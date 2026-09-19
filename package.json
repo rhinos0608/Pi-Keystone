@@ -7,15 +7,25 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:integration": "vitest run test/integration"
+    "test:integration": "vitest run test/integration",
+    "test:live-e2e": "python3 test/host/live-e2e.py --depth standard",
+    "test:live-e2e:full": "python3 test/host/live-e2e.py --depth full"
   },
-  "piConfig": {
-    "extensions": ["./src/index.ts"]
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "peerDependencies": {
-    "pi": ">=0.84.1"
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@earendil-works/pi-tui": "^0.85.1"
   },
   "devDependencies": {
+    "@earendil-works/pi-tui": "^0.85.1",
     "typescript": "^5.7.0",
     "vitest": "^3.2.1"
   }

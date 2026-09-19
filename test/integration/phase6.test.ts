@@ -20,7 +20,7 @@ import { createKeystone } from "../../src/index.js";
 
 // ─── Context compiler GoalStore (context/types.ts interface) ────────────────
 import type {
-  GoalStore as ContextGoalStore,
+  ContextGoalStore,
   ContractRef,
   Finding,
   EntityRef,
@@ -347,11 +347,27 @@ describe("Phase 6: Execution scheduler — read-only dispatch", () => {
   });
 
   it("mutation policy with permit allows mutation tools", () => {
-    const decision = ks.enforceToolPolicy("write", {
-      kind: "mutation",
-      permitToken: "valid-token",
-    });
+    const decision = ks.enforceToolPolicy(
+      "write",
+      {
+        kind: "mutation",
+        permit: { leaseId: "lease-1", fencingToken: 1 },
+      },
+      { leaseId: "lease-1", fencingToken: 1 },
+    );
     expect(decision.allowed).toBe(true);
+  });
+
+  it("mutation policy rejects permit bound to another lease", () => {
+    const decision = ks.enforceToolPolicy(
+      "write",
+      {
+        kind: "mutation",
+        permit: { leaseId: "lease-other", fencingToken: 1 },
+      },
+      { leaseId: "lease-1", fencingToken: 1 },
+    );
+    expect(decision.allowed).toBe(false);
   });
 
   it("mutation policy without permit denies mutation tools", () => {
@@ -403,6 +419,8 @@ describe("Phase 6: Execution scheduler — mutation dispatch", () => {
       { id: assignmentId, description: "fix auth", targetFiles: ["src/auth.ts"] },
       contextView,
       lease,
+      undefined,
+      { writeSet: ["src/"] },
     );
 
     // Two-phase protocol: acquisition then mutation
@@ -411,7 +429,10 @@ describe("Phase 6: Execution scheduler — mutation dispatch", () => {
     expect(result.turns[0].delegation.toolPolicy.kind).toBe("read-only");
     expect(result.turns[1].phase).toBe("mutation");
     expect(result.turns[1].delegation.toolPolicy.kind).toBe("mutation");
-    expect(result.turns[1].delegation.toolPolicy.permitToken).toBe("lease-1");
+    const mutationPolicy = result.turns[1].delegation.toolPolicy as {
+      permit?: { leaseId: string; fencingToken: number };
+    };
+    expect(mutationPolicy.permit?.leaseId).toBe("lease-1");
     expect(result.lease.leaseId).toBe("lease-1");
     expect(result.report).toBeNull();
   });
@@ -445,29 +466,54 @@ describe("Phase 6: Execution scheduler — mutation dispatch", () => {
         { id: assignmentId, description: "fix auth", targetFiles: ["src/auth.ts"] },
         contextView,
         expiredLease,
+        undefined,
+        { writeSet: ["src/"] },
       ),
     ).toThrow("invalid mutation lease");
   });
 
   it("acquireLease creates a lease and checkLease validates it", () => {
-    const result = ks.acquireLease({ goalId: "g-1", root: "/tmp/project" });
+    const root = mkdtempSync(join(tmpdir(), "keystone-p6-lease-"));
+    const result = ks.acquireLease({
+      goalId: "g-1",
+      assignmentId: "asgn-p6-1" as AssignmentId,
+      sessionId: "sess-p6-1",
+      root,
+      writeSet: ["src/a.ts"],
+    });
     expect(result.acquired).toBe(true);
     if (result.acquired) {
-      const check = ks.checkLease("/tmp/project");
+      const check = ks.checkLease(root);
       expect(check).not.toBeNull();
+      if (check !== null && typeof check === "object" && "conflict" in check) {
+        throw new Error(`unexpected lease conflict: ${check.reason}`);
+      }
       expect(check!.leaseId).toBe(result.lease.leaseId);
 
       // Release it
-      const released = ks.releaseLease("/tmp/project", result.lease.leaseId);
+      const released = ks.releaseLease(root, result.lease.leaseId);
       expect(released).toBe(true);
-      expect(ks.checkLease("/tmp/project")).toBeNull();
+      expect(ks.checkLease(root)).toBeNull();
     }
   });
 
   it("acquireLease denies duplicate lease on same root", () => {
-    const r1 = ks.acquireLease({ goalId: "g-1", root: "/tmp/dup" });
+    const root = mkdtempSync(join(tmpdir(), "keystone-p6-dup-"));
+    const r1 = ks.acquireLease({
+      goalId: "g-1",
+      assignmentId: "asgn-p6-d1" as AssignmentId,
+      sessionId: "sess-p6-d1",
+      root,
+      writeSet: ["src/a.ts"],
+    });
     expect(r1.acquired).toBe(true);
-    const r2 = ks.acquireLease({ goalId: "g-2", root: "/tmp/dup" });
+    const r2 = ks.acquireLease({
+      goalId: "g-2",
+      assignmentId: "asgn-p6-d2" as AssignmentId,
+      sessionId: "sess-p6-d2",
+      root,
+      writeSet: ["src/a.ts"],
+    });
     expect(r2.acquired).toBe(false);
   });
 });
@@ -528,8 +574,11 @@ describe("Phase 6: Worker guard integration", () => {
 
   it("mutation guard allows tools with permit token", () => {
     const guard = ks.registerWorkerGuard(
-      { kind: "mutation", permitToken: "permit-abc" },
-      { sessionId: "session-mut", lease: { root: "/tmp", fencingToken: 1, expiresAt: Date.now() + 60_000 } },
+      { kind: "mutation", permit: { leaseId: "lease-1", fencingToken: 1 } },
+      {
+        sessionId: "session-mut",
+        lease: { leaseId: "lease-1", root: "/tmp", fencingToken: 1, expiresAt: Date.now() + 60_000 },
+      },
     );
 
     const result = guard.check({
