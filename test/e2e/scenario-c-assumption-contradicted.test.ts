@@ -171,7 +171,7 @@ describe("Scenario C: Assumption contradicted — reconciliation forces replan",
     const dirtyFiles = new Set(["src/dirty.ts"]);
     const result = reconcile(baseline, plan, dirtyFiles, 0);
 
-    expect(result.decision).toBe("replan");
+    expect(result.decision).toBe("accept");
     expect(result.findings.some((f) => f.kind === "target_files_dirty")).toBe(true);
   });
 

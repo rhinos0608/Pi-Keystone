@@ -11,6 +11,26 @@ import type { CompletionCriterion } from "../contract/draft.js";
 
 export type CriterionVerdict = "satisfied" | "unsatisfied" | "insufficient-evidence";
 
+/**
+ * Per-criterion evaluation status for the evidence graph.
+ * Maps from CriterionVerdict: satisfied → pass, unsatisfied → fail,
+ * insufficient-evidence → skipped. Only "pass" satisfies a hard requirement.
+ */
+export type CriterionEvalStatus = "pass" | "fail" | "skipped";
+
+export type CriterionEvaluation = {
+  /** The criterion that was evaluated. */
+  readonly criterionId: string;
+  /** The criterion text. */
+  readonly criterionText: string;
+  /** Per-criterion status the evidence graph can reference. */
+  readonly status: CriterionEvalStatus;
+  /** Human-readable explanation. */
+  readonly reason: string;
+  /** Evidence refs backing this result (proof commands + descriptions). */
+  readonly evidenceRefs: readonly string[];
+};
+
 export type HardProof = {
   readonly kind: "command-output";
   /** The command that was run. */
@@ -150,6 +170,63 @@ function evaluateSoft(
       ? "no evidence provided"
       : "provided evidence does not match criterion keywords",
   };
+}
+
+// ─── Per-criterion results for the evidence graph ─────────────────────────
+
+/**
+ * Map one CriterionResult to the per-criterion status the evidence graph
+ * references. Preserves reason and collects evidence refs (proof commands
+ * plus matched descriptions are not tracked separately, so refs are the
+ * proof commands backing the verdict).
+ */
+export function toCriterionEvaluation(
+  result: CriterionResult,
+  evidence: Evidence,
+): CriterionEvaluation {
+  const status: CriterionEvalStatus =
+    result.verdict === "satisfied"
+      ? "pass"
+      : result.verdict === "unsatisfied"
+        ? "fail"
+        : "skipped";
+  if (status === "pass" && result.hardProofs.length > 0) {
+    return {
+      criterionId: result.criterionId,
+      criterionText: result.criterionText,
+      status,
+      reason: result.reason,
+      evidenceRefs: result.hardProofs.map((p) => p.command),
+    };
+  }
+  if (status === "pass" && evidence.descriptions.length > 0) {
+    return {
+      criterionId: result.criterionId,
+      criterionText: result.criterionText,
+      status,
+      reason: result.reason,
+      evidenceRefs: [...evidence.descriptions],
+    };
+  }
+  return {
+    criterionId: result.criterionId,
+    criterionText: result.criterionText,
+    status,
+    reason: result.reason,
+    evidenceRefs: [],
+  };
+}
+
+/**
+ * Evaluate each criterion independently, producing one
+ * pass/fail/skipped result per criterion for the evidence graph.
+ */
+export function evaluateCriteria(
+  items: readonly { criterion: CompletionCriterion; evidence: Evidence }[],
+): CriterionEvaluation[] {
+  return items.map(({ criterion, evidence }) =>
+    toCriterionEvaluation(evaluateCriterion(criterion, evidence), evidence),
+  );
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────

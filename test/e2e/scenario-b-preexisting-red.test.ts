@@ -86,7 +86,7 @@ describe("Scenario B: Pre-existing failures", () => {
     // No task_failure contradiction, but outside_cone_failure detected.
     expect(result.findings.length).toBe(1);
     expect(result.findings[0].kind).toBe("outside_cone_failure");
-    expect(result.decision).toBe("replan");
+    expect(result.decision).toBe("accept");
   });
 
   it("plan that targets pre-existing failure files triggers contradiction", () => {

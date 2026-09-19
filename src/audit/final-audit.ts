@@ -11,6 +11,9 @@ import type { AssignmentId, ArtifactRef, ISO8601 } from "../domain/types.js";
 import type { GoalContract, ContractStatement } from "../contract/goal-contract.js";
 import type { AssignmentIndex, AssignmentIndexEntry } from "../execution/assignment-index.js";
 import type { ReviewFinding } from "../review/types.js";
+import type { EvidenceManifest } from "../evidence/types.js";
+
+export { UnknownEvidenceIdError } from "../evidence/types.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -22,12 +25,23 @@ export type AuditorSession = {
   readonly outcome: AuditOutcome;
   readonly findings: readonly ReviewFinding[];
   readonly evidenceChecklist: readonly EvidenceCheckItem[];
+  /** Claims against evidence-manifest node IDs. Validated when input carries a manifest. */
+  readonly claims?: readonly AuditorClaim[];
 };
 
 export type EvidenceCheckItem = {
   readonly artifactRef: ArtifactRef;
   readonly description: string;
   readonly present: boolean;
+};
+
+/**
+ * One auditor claim against the evidence manifest. Every claim must
+ * reference a node ID present in the manifest; unknown IDs are rejected.
+ */
+export type AuditorClaim = {
+  readonly nodeId: string;
+  readonly statement: string;
 };
 
 export type FinalAuditResult =
@@ -48,6 +62,11 @@ export type FinalAuditInput = {
   readonly assignmentIndex: AssignmentIndex;
   /** Two auditor sessions to validate. Must have distinct identities. */
   readonly auditorSessions: [AuditorSession, AuditorSession];
+  /**
+   * Evidence manifest the auditors consume. REQUIRED: claim validation
+   * and coverage proof always run against it.
+   */
+  readonly manifest: EvidenceManifest;
 };
 
 // ─── runFinalAudit ─────────────────────────────────────────────────────────
@@ -62,6 +81,9 @@ export type FinalAuditInput = {
  * 4. Both identities were registered AFTER the last non-auditor entry (fresh session)
  * 5. Both accept
  * 6. Evidence checklist covers all contract artifacts
+ * 7. Every auditor claim references a manifest node ID (manifest REQUIRED)
+ * 8. Manifest coverage is complete
+ * 9. Every present checklist item cross-checks to a manifest node ID
  */
 export function runFinalAudit(input: FinalAuditInput): FinalAuditResult {
   const [a1, a2] = input.auditorSessions;
@@ -125,32 +147,52 @@ export function runFinalAudit(input: FinalAuditInput): FinalAuditResult {
     };
   }
 
-  return { status: "DONE", audits: input.auditorSessions };
-}
-
-// ─── Evidence checklist builder ────────────────────────────────────────────
-
-/**
- * Build an evidence checklist from contract statements.
- * Each requirement, invariant, and completion criterion maps to an artifact ref.
- */
-export function buildEvidenceChecklist(
-  contract: GoalContract,
-  knownArtifacts: Map<string, boolean>,
-): EvidenceCheckItem[] {
-  const items: EvidenceCheckItem[] = [];
-
-  for (const section of [contract.requirements, contract.invariants, contract.completionCriteria]) {
-    for (const stmt of section) {
-      items.push({
-        artifactRef: stmt.id as unknown as ArtifactRef,
-        description: stmt.text,
-        present: knownArtifacts.get(stmt.id) ?? false,
-      });
+  // Validate auditor claims against the REQUIRED evidence manifest.
+  // Auditors consume the manifest as input: claims referencing unknown
+  // node IDs are rejected with a typed-error-backed reason, and contract
+  // coverage must be complete. Claim validation + coverage proof always run.
+  const known = new Set(input.manifest.nodeIds);
+  for (const session of input.auditorSessions) {
+    for (const claim of session.claims ?? []) {
+      if (!known.has(claim.nodeId)) {
+        return {
+          status: "AUDIT_REJECTED",
+          audits: input.auditorSessions,
+          reason:
+            `UnknownEvidenceIdError: auditor "${session.sessionId}" ` +
+            `references unknown evidence ID "${claim.nodeId}"`,
+        };
+      }
+    }
+  }
+  // Contract coverage is proven by the manifest coverage summary.
+  if (input.manifest.coverage.uncovered.length > 0) {
+    return {
+      status: "AUDIT_REJECTED",
+      audits: input.auditorSessions,
+      reason:
+        `Incomplete contract coverage: ` +
+        `${input.manifest.coverage.uncovered.join(", ")}`,
+    };
+  }
+  // Cross-check checklist items against manifest node IDs: every present
+  // item must resolve to an `artifact:<ref>` node in the manifest.
+  for (const session of input.auditorSessions) {
+    for (const item of session.evidenceChecklist) {
+      if (!item.present) continue; // missing items rejected above
+      if (!known.has(`artifact:${item.artifactRef}`)) {
+        return {
+          status: "AUDIT_REJECTED",
+          audits: input.auditorSessions,
+          reason:
+            `Checklist item "${item.description}" (ref "${item.artifactRef}") ` +
+            `from auditor "${session.sessionId}" has no manifest node ID`,
+        };
+      }
     }
   }
 
-  return items;
+  return { status: "DONE", audits: input.auditorSessions };
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────

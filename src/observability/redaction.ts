@@ -1,8 +1,22 @@
 // Redaction: sanitize PII/secrets from logs before persistence.
 // Pattern-based detection on strings, recursive on objects.
+//
+// NOTE (ownership): this module redacts when CALLED — wiring at call sites
+// (launchers, log emitters) is launcher-owned, not done here. Call
+// redactString/redactObject before persisting or emitting logs.
 
 /** Patterns that indicate sensitive data. */
 const REDACTION_PATTERNS: Array<{ label: string; re: RegExp }> = [
+  // Keystone authority sentinel blocks (lease transport — never loggable)
+  {
+    label: "KEYSTONE_AUTHORITY",
+    re: /---KEYSTONE-AUTHORITY-V1[\s\S]*?---END-KEYSTONE-AUTHORITY-V1/g,
+  },
+  // Lease JSON values keyed by lease field names (full lease field set)
+  {
+    label: "LEASE_ID",
+    re: /"(?:leaseId|fencingToken|assignmentId|sessionId|goalId|workerProcessIdentity|canonicalWorkspaceRoot|allowedCanonicalPaths|approvedCommands|allowedMcpTools|dirtySignature|baseDirtySignature)"\s*:\s*(?:"[^"]*"|\[[^\]]*\]|[^,}\s]+)/g,
+  },
   // Email addresses
   { label: "EMAIL", re: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g },
   // API keys / tokens (common prefixes)
@@ -50,8 +64,39 @@ export function redactString(input: string): string {
 }
 
 /**
- * Redact all string values in an object (deep).
- * Returns a new object; original untouched.
+ * Redact an Error's message (and message-bearing fields) for safe rethrow/logging.
+ * Returns an error of the same constructor with a redacted message.
+ */
+export function redactError(err: unknown): unknown {
+  if (err instanceof Error) {
+    const safe = Object.create(Object.getPrototypeOf(err)) as Error;
+    Object.defineProperty(safe, "message", {
+      value: redactString(err.message),
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+    // Preserve typed CAS/identity fields: the fresh instance drops every own
+    // enumerable prop (code, goalId, expectedVersion, actualVersion, ...).
+    // Copy them over, redacting string values only (numbers/booleans pass
+    // through; lease material in strings is still scrubbed).
+    for (const key of Object.keys(err)) {
+      if (key === "message" || key === "stack") continue;
+      const value = (err as unknown as Record<string, unknown>)[key];
+      (safe as unknown as Record<string, unknown>)[key] =
+        typeof value === "string" ? redactString(value) : value;
+    }
+    return safe;
+  }
+  if (typeof err === "string") return redactString(err);
+  if (err !== null && typeof err === "object") return redactObject(err);
+  return err;
+}
+
+/**
+ * Redact all values in an object (deep) by key for lease/secret material.
+ * Non-string values (numbers, arrays, objects) under a sensitive key are
+ * redacted too — not just strings.
  */
 export function redactObject<T>(input: T): T {
   if (input === null || input === undefined) return input;
@@ -60,8 +105,9 @@ export function redactObject<T>(input: T): T {
   if (typeof input === "object") {
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
-      // Redact keys that look like secrets
-      if (/secret|token|password|key|auth/i.test(key) && typeof value === "string") {
+      // Redact keys that look like secrets or lease material (any value type)
+      if (/secret|token|passwd|password|api[-_ ]?key|private[-_ ]?key|authorization|bearer|sessionId|goalId|workerProcessIdentity|canonicalWorkspaceRoot|allowedCanonicalPaths|approvedCommands|allowedMcpTools|dirtySignature|baseDirtySignature/i.test(key)
+        || /^(leaseId|fencingToken|assignmentId)$/.test(key)) {
         result[key] = "[REDACTED]";
       } else {
         result[key] = redactObject(value);

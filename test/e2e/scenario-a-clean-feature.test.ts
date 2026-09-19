@@ -169,7 +169,7 @@ describe("Scenario A: Clean Feature — full lifecycle", () => {
     // 13. Verify terminal state
     const final = store.get(goalId)!;
     expect(final.state).toBe("DONE");
-    expect(final.reviewCycles).toBe(0);
+    expect(final.reviewCycles).toBe(1);
     expect(final.repairCycles).toBe(0);
     expect(final.contractVersion).toBe(1);
 

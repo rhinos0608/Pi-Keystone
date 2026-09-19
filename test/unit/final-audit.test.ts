@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
 import type { AssignmentId, ArtifactRef, GoalContract } from "../../src/domain/types.js";
 import type { AssignmentIndex } from "../../src/execution/assignment-index.js";
 import type { AuditorSession, FinalAuditInput } from "../../src/audit/final-audit.js";
-import { runFinalAudit, buildEvidenceChecklist } from "../../src/audit/final-audit.js";
+import { runFinalAudit } from "../../src/audit/final-audit.js";
+import type { EvidenceManifest } from "../../src/evidence/types.js";
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -65,6 +66,14 @@ function auditor(sessionId: string, outcome: "ACCEPTED" | "REJECTED"): AuditorSe
   };
 }
 
+function testManifest(): EvidenceManifest {
+  return {
+    nodeIds: ["artifact:REQ-001", "artifact:INV-001", "artifact:CC-001"],
+    chains: [],
+    coverage: { total: 0, covered: 0, uncovered: [] },
+  };
+}
+
 function makeInput(index: AssignmentIndex, sessions: [AuditorSession, AuditorSession]): FinalAuditInput {
   return {
     goalId: "g1",
@@ -75,6 +84,7 @@ function makeInput(index: AssignmentIndex, sessions: [AuditorSession, AuditorSes
     snapshotRefs: [],
     assignmentIndex: index,
     auditorSessions: sessions,
+    manifest: testManifest(),
   };
 }
 
@@ -233,15 +243,5 @@ describe("runFinalAudit", () => {
     if (result.status === "AUDIT_REJECTED") {
       expect(result.reason).toContain("sess-a");
     }
-  });
-});
-
-describe("buildEvidenceChecklist", () => {
-  it("covers requirements, invariants, and completion criteria", () => {
-    const items = buildEvidenceChecklist(contract, new Map([["REQ-001", true]]));
-    expect(items).toHaveLength(3); // 1 req + 1 inv + 1 cc
-    expect(items[0].present).toBe(true);  // REQ-001
-    expect(items[1].present).toBe(false); // INV-001 not in map
-    expect(items[2].present).toBe(false); // CC-001 not in map
   });
 });

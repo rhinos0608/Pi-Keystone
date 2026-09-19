@@ -18,6 +18,12 @@ import {
 } from "../baseline/compare.js";
 import { computeFingerprint } from "../baseline/failure-fingerprint.js";
 import {
+  evaluateCriteria,
+  type CriterionEvaluation,
+  type Evidence as CriterionEvidence,
+} from "./criterion-evaluator.js";
+import type { CompletionCriterion } from "../contract/draft.js";
+import {
   CheckOutcome as FrozenOutcome,
   type BaselineRecord,
   type CheckRecord as FrozenCheck,
@@ -48,6 +54,32 @@ export type VerificationResult = {
 };
 
 // ─── Core ─────────────────────────────────────────────────────────────────
+
+export type { CriterionEvaluation };
+
+export type PerCriterionVerification = {
+  /** Overall status: PASS only when every criterion passes (fail-closed). */
+  readonly overall: VerificationStatus;
+  /** One result per criterion, in input order. */
+  readonly perCriterion: readonly CriterionEvaluation[];
+};
+
+/**
+ * Evaluate each criterion independently against its own evidence.
+ * Produces the per-criterion pass/fail/skipped results the evidence
+ * graph references. Overall is PASS only when every criterion passes;
+ * any fail or skip fails the run (fail-closed).
+ */
+export function runVerificationPerCriterion(
+  items: readonly { criterion: CompletionCriterion; evidence: CriterionEvidence }[],
+): PerCriterionVerification {
+  const perCriterion = evaluateCriteria(items);
+  const overall: VerificationStatus = perCriterion.length > 0 &&
+      perCriterion.every((r) => r.status === "pass")
+    ? "PASS"
+    : "FAIL";
+  return { overall, perCriterion };
+}
 
 /**
  * Run ordered checks and compare results against a baseline.

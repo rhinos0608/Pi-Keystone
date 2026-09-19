@@ -4,6 +4,12 @@ import type { ReviewFinding } from "../../src/review/types.js";
 import type { FinalAuditResult } from "../../src/audit/final-audit.js";
 import { evaluateCompletion } from "../../src/audit/completion-gate.js";
 import type { CompletionInput } from "../../src/audit/completion-gate.js";
+import { createEvidenceGraph } from "../../src/evidence/graph.js";
+import {
+  parseFinalAuditorOutput,
+  parseReviewDecision,
+  requirementSourcesFromAssertions,
+} from "../../src/runtime/completion-flow.js";
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -65,16 +71,107 @@ function input(overrides: Partial<CompletionInput>): CompletionInput {
     verification: overrides.verification ?? passedVerification,
     findings: overrides.findings ?? [],
     audit: overrides.audit ?? doneAudit,
+    auditPolicy: overrides.auditPolicy,
+    reviewAccepted: overrides.reviewAccepted,
+    evidenceManifest: overrides.evidenceManifest,
+    requirementSources: overrides.requirementSources,
   };
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
+
+describe("parseReviewDecision", () => {
+  it("accepts an explicit verdict after markdown/reasoning", () => {
+    expect(parseReviewDecision("## Review\nNo issues found.\nACCEPTED: clean")).toBe("ACCEPTED");
+  });
+
+  it("uses the final explicit decision line and ignores prose mentions", () => {
+    expect(parseReviewDecision("The prompt said ACCEPTED when clean.\nERROR: concrete defect")).toBe("ERROR");
+    expect(parseReviewDecision("BLOCKER: initial concern\nResolved after inspection.\nACCEPTED: clean")).toBe("ACCEPTED");
+  });
+});
+
+describe("parseFinalAuditorOutput", () => {
+  it("accepts structured claims and evidence checklist", () => {
+    const parsed = parseFinalAuditorOutput({
+      outcome: "ACCEPTED",
+      summary: "checked",
+      claims: [{ nodeId: "assertion:a", statement: "criterion supported" }],
+      evidenceChecklist: [{ artifactRef: "abc", description: "report", present: true }],
+    });
+    expect(parsed?.outcome).toBe("ACCEPTED");
+    expect(parsed?.claims[0].nodeId).toBe("assertion:a");
+  });
+
+  it("fails closed on missing claims/checklist", () => {
+    expect(parseFinalAuditorOutput({
+      outcome: "ACCEPTED",
+      summary: "checked",
+      claims: [],
+      evidenceChecklist: [],
+    })).toBeNull();
+  });
+});
+
+describe("requirementSourcesFromAssertions", () => {
+  it("conservatively maps arbitrary explicit criteria to every hard requirement", () => {
+    const explicitContract: GoalContract = {
+      schemaVersion: 1,
+      version: 1 as any,
+      goalId: "g-explicit",
+      requirements: [
+        { id: "req-user-1", text: "Requested behavior", provenance: "explicit-user", strength: "hard" },
+      ],
+      invariants: [],
+      completionCriteria: [
+        { id: "custom-a", text: "Custom A passes", provenance: "explicit-user", strength: "hard" },
+        { id: "custom-b", text: "Custom B passes", provenance: "explicit-user", strength: "hard" },
+      ],
+      assumptions: [],
+    };
+    const sources = requirementSourcesFromAssertions(
+      explicitContract,
+      new Map([
+        ["custom-a", ["assert-a"]],
+        ["custom-b", ["assert-b"]],
+      ]),
+    );
+    expect(sources).toEqual([{ requirementId: "req-user-1", assertionIds: ["assert-a", "assert-b"] }]);
+  });
+});
 
 describe("evaluateCompletion", () => {
   it("returns DONE when all predicates satisfied (no hard reqs)", () => {
     const result = evaluateCompletion(input({ contract: emptyContract }));
     expect(result.status).toBe("DONE");
     expect(result.predicates.every((p) => p.satisfied)).toBe(true);
+  });
+
+  it("quick policy can finish without a dual audit", () => {
+    const result = evaluateCompletion(input({
+      contract: emptyContract,
+      audit: undefined,
+      auditPolicy: "verification-only",
+    }));
+    expect(result.status).toBe("DONE");
+    expect(result.predicates.find((p) => p.id === "audit-accepted")?.satisfied).toBe(true);
+  });
+
+  it("standard policy requires one accepted independent review", () => {
+    const accepted = evaluateCompletion(input({
+      contract: emptyContract,
+      audit: undefined,
+      auditPolicy: "single-review",
+      reviewAccepted: true,
+    }));
+    const rejected = evaluateCompletion(input({
+      contract: emptyContract,
+      audit: undefined,
+      auditPolicy: "single-review",
+      reviewAccepted: false,
+    }));
+    expect(accepted.status).toBe("DONE");
+    expect(rejected.status).toBe("REPAIRING");
   });
 
   it("returns REPAIRING when verification fails (repairable)", () => {
@@ -136,9 +233,24 @@ describe("evaluateCompletion", () => {
   });
 
   it("criteria predicates reflect verification result", () => {
-    const passResult = evaluateCompletion(input({ verification: passedVerification }));
+    const graph = createEvidenceGraph();
+    graph.addCriterion("CC-001", "Tests pass");
+    graph.attachAssertion("CC-001", { verdict: "pass", reason: "green" });
+    const manifest = graph.manifestFor(["CC-001"]);
+    const passResult = evaluateCompletion(input({
+      verification: passedVerification,
+      evidenceManifest: manifest,
+    }));
     const passCrit = passResult.predicates.find((p) => p.id === "criteria-met-CC-001");
     expect(passCrit?.satisfied).toBe(true);
+
+    const manifestButFailed = evaluateCompletion(input({
+      verification: failedVerification,
+      evidenceManifest: manifest,
+    }));
+    const manifestFailCrit = manifestButFailed.predicates.find((p) => p.id === "criteria-met-CC-001");
+    expect(manifestFailCrit?.satisfied).toBe(false);
+    expect(manifestButFailed.status).not.toBe("DONE");
 
     const failResult = evaluateCompletion(input({ verification: failedVerification }));
     const failCrit = failResult.predicates.find((p) => p.id === "criteria-met-CC-001");
