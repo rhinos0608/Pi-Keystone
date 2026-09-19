@@ -23,6 +23,8 @@ export type ReportEnvelope = {
   readonly sessionId: string;
   readonly findings: readonly Finding[];
   readonly evidenceRefs: readonly string[];
+  /** Optional typed child result preserved for higher-level protocols (audit, verifier, etc.). */
+  readonly structuredOutput?: unknown;
   readonly status: ReportStatus;
   readonly createdAt: ISO8601;
 };
@@ -120,6 +122,7 @@ export function validateEnvelope(
         ? (raw.evidenceRefs as unknown[]).map(String)
         : [],
     ) as readonly string[],
+    ...(raw.structuredOutput !== undefined ? { structuredOutput: raw.structuredOutput } : {}),
     status: "DELIVERED",
     createdAt: raw.createdAt as ISO8601,
   };
@@ -137,6 +140,7 @@ export function createReportEnvelope(
     sessionId: string;
     findings?: readonly Finding[];
     evidenceRefs?: readonly string[];
+    structuredOutput?: unknown;
     createdAt?: ISO8601;
   },
   opts?: { maxSessionAgeMs?: number; now?: () => number },
@@ -148,6 +152,7 @@ export function createReportEnvelope(
       sessionId: fields.sessionId,
       findings: fields.findings ?? [],
       evidenceRefs: fields.evidenceRefs ?? [],
+      ...(fields.structuredOutput !== undefined ? { structuredOutput: fields.structuredOutput } : {}),
       createdAt: fields.createdAt ?? (new Date().toISOString() as ISO8601),
     },
     opts,

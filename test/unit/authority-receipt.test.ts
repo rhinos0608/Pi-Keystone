@@ -3,6 +3,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   recordReceipt,
+  hashReceipt,
+  canonicalReceiptBytes,
   validateReceipts,
   clearReceipts,
   listReceipts,
@@ -39,6 +41,23 @@ describe("recordReceipt / listReceipts", () => {
     recordReceipt(makeReceipt({ toolCallId: "tc-1", resourceIds: ["/a.ts"] }));
     recordReceipt(makeReceipt({ toolCallId: "tc-2", resourceIds: ["/b.ts"] }));
     expect(listReceipts(SESSION)).toHaveLength(2);
+  });
+
+  it("persists canonical receipt bytes through an explicit CAS store", () => {
+    const receipt = makeReceipt();
+    const expected = hashReceipt(receipt);
+    let stored = "";
+    const store = {
+      writeArtifact(content: Buffer | string) {
+        stored = Buffer.isBuffer(content) ? content.toString("utf8") : content;
+        return expected;
+      },
+      readArtifact() { return Buffer.from(stored, "utf8"); },
+      hasArtifact() { return stored.length > 0; },
+    };
+    const ref = recordReceipt(receipt, store);
+    expect(ref).toBe(expected);
+    expect(stored).toBe(canonicalReceiptBytes(receipt));
   });
 });
 

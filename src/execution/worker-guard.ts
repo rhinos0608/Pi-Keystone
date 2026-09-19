@@ -1,7 +1,14 @@
-// Worker guard — intercepts tool_call events and enforces tool policy.
+// Worker guard — parent-side receipt bookkeeping for tool_call events.
+//
+// Path confinement is NOT enforced here. Write-scope validation belongs to
+// the Keystone child guard extension (src/child/keystone-child-guard.ts),
+// which runs inside the child process and sees the real tool arguments.
+// This guard only records per-call receipts (GuardReceipt: toolCallId,
+// toolName, sessionId, decision, reason, and at), stamped with an
+// attestation nonce.
 
 import { randomUUID } from "node:crypto";
-import { enforceToolPolicy, type ToolPolicy } from "./tool-policy.js";
+import { enforceToolPolicy, type LeaseBinding, type ToolPolicy } from "./tool-policy.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -9,12 +16,29 @@ export type ToolCallEvent = {
   toolCallId: string;
   toolName: string;
   sessionId: string;
+  /** Assignment this call claims to serve (checked when the guard binds one). */
+  assignmentId?: string;
+  /** Requested bash command (exact-match evaluation under mutation policy). */
+  command?: string;
 };
 
 export type GuardLease = {
+  /** Lease identity for structural permit binding; absent on legacy leases. */
+  leaseId?: string;
   root: string;
   fencingToken: number;
   expiresAt: number;
+  /** Assignment the lease was acquired for (checked when the guard binds one). */
+  assignmentId?: string;
+};
+
+export type GuardReceipt = {
+  toolCallId: string;
+  toolName: string;
+  sessionId: string;
+  decision: "allow" | "deny";
+  reason?: string;
+  at: string;
 };
 
 export type GuardResult =
@@ -25,13 +49,17 @@ export type WorkerGuard = {
   sessionId: string;
   policy: ToolPolicy;
   attestationNonce: string;
+  /** Append-only bookkeeping of every checked call, in check order. */
+  receipts: GuardReceipt[];
   check(event: ToolCallEvent, lease?: GuardLease): GuardResult;
 };
 
-// File-writing tools that require path validation against lease root
-const FILE_WRITE_TOOLS = new Set(["write", "edit"]);
-
 // ─── Factory ────────────────────────────────────────────────────────────────
+
+function bindingOf(lease: GuardLease | undefined): LeaseBinding | undefined {
+  if (!lease || lease.leaseId === undefined) return undefined;
+  return { leaseId: lease.leaseId, fencingToken: lease.fencingToken };
+}
 
 /**
  * Create a worker guard that enforces `policy` for a session.
@@ -39,70 +67,89 @@ const FILE_WRITE_TOOLS = new Set(["write", "edit"]);
  */
 export function registerWorkerGuard(
   policy: ToolPolicy,
-  options?: { sessionId?: string; lease?: GuardLease },
+  options?: { sessionId?: string; lease?: GuardLease; assignmentId?: string },
 ): WorkerGuard {
   const sid = options?.sessionId ?? randomUUID();
   const nonce = randomUUID();
   const boundLease = options?.lease;
+  const expectedAssignment = options?.assignmentId ?? boundLease?.assignmentId;
+  const receipts: GuardReceipt[] = [];
+
+  function record(
+    event: ToolCallEvent,
+    decision: "allow" | "deny",
+    reason?: string,
+  ): void {
+    receipts.push({
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      sessionId: event.sessionId,
+      decision,
+      ...(reason !== undefined ? { reason } : {}),
+      at: new Date().toISOString(),
+    });
+  }
+
+  function deny(event: ToolCallEvent, reason: string): GuardResult {
+    record(event, "deny", reason);
+    return { decision: "deny", reason, attestationNonce: nonce };
+  }
 
   return {
     sessionId: sid,
     policy,
     attestationNonce: nonce,
+    receipts,
     check(event: ToolCallEvent, lease?: GuardLease) {
       // Cross-session check
       if (event.sessionId !== sid) {
-        return {
-          decision: "deny",
-          reason: `session mismatch: expected ${sid}, got ${event.sessionId}`,
-          attestationNonce: nonce,
-        };
+        return deny(event, `session mismatch: expected ${sid}, got ${event.sessionId}`);
       }
 
-      // Mutation policy: lease is mandatory
-      if (this.policy.kind === "mutation") {
-        const effectiveLease = lease ?? boundLease;
+      // Mutation policy: lease is mandatory and must be live.
+      const effectiveLease = lease ?? boundLease;
+      if (policy.kind === "mutation") {
         if (!effectiveLease) {
-          return {
-            decision: "deny",
-            reason: `mutation policy requires a lease but none was provided`,
-            attestationNonce: nonce,
-          };
+          return deny(event, `mutation policy requires a lease but none was provided`);
         }
-
-        // Lease expiry check
+        // Lease root must be a non-empty binding — an empty root would make
+        // reduced-scope checks vacuous, so deny before reaching the policy.
+        if (typeof effectiveLease.root !== "string" || effectiveLease.root.length === 0) {
+          return deny(event, `mutation policy requires a non-empty lease root`);
+        }
         if (effectiveLease.expiresAt <= Date.now()) {
-          return {
-            decision: "deny",
-            reason: `lease expired at ${new Date(effectiveLease.expiresAt).toISOString()}`,
-            attestationNonce: nonce,
-          };
+          return deny(
+            event,
+            `lease expired at ${new Date(effectiveLease.expiresAt).toISOString()}`,
+          );
         }
-
-        // File-writing tools: target path must be under lease root
-        if (FILE_WRITE_TOOLS.has(event.toolName)) {
-          // The tool name is write/edit; the actual path would come from the tool call args.
-          // For guard purposes, we validate against the session-bound lease root.
-          // Path extraction happens upstream; here we ensure the lease root is set.
-          if (!effectiveLease.root) {
-            return {
-              decision: "deny",
-              reason: `lease has no root path for file-writing tool "${event.toolName}"`,
-              attestationNonce: nonce,
-            };
+        // Assignment binding: when the guard knows the expected assignment,
+        // the event and lease must agree with it — keeps reduced scope honest.
+        if (expectedAssignment !== undefined) {
+          const leaseAssignment = effectiveLease.assignmentId;
+          if (leaseAssignment !== undefined && leaseAssignment !== expectedAssignment) {
+            return deny(
+              event,
+              `lease assignment mismatch: expected ${expectedAssignment}, got ${leaseAssignment}`,
+            );
+          }
+          if (event.assignmentId !== undefined && event.assignmentId !== expectedAssignment) {
+            return deny(
+              event,
+              `event assignment mismatch: expected ${expectedAssignment}, got ${event.assignmentId}`,
+            );
           }
         }
       }
 
-      const result = enforceToolPolicy(event.toolName, this.policy);
+      const result = enforceToolPolicy(event.toolName, policy, bindingOf(effectiveLease), {
+        command: event.command,
+      });
       if (result.allowed) {
+        record(event, "allow");
         return { decision: "allow" };
       }
-      return {
-        decision: "deny",
-        reason: result.reason,
-        attestationNonce: nonce,
-      };
+      return deny(event, result.reason);
     },
   };
 }

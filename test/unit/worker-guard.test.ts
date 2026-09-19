@@ -57,12 +57,117 @@ describe("worker-guard — session mismatch", () => {
 describe("worker-guard — mutation with permit", () => {
   const sessionId = "mut-session";
   const guard = registerWorkerGuard(
-    { kind: "mutation", permitToken: "permit-abc" },
-    { sessionId, lease: { root: "/tmp", fencingToken: 1, expiresAt: Date.now() + 60_000 } },
+    { kind: "mutation", permit: { leaseId: "lease-1", fencingToken: 1 } },
+    {
+      sessionId,
+      lease: { leaseId: "lease-1", root: "/tmp", fencingToken: 1, expiresAt: Date.now() + 60_000 },
+    },
   );
 
-  it("allows bash when permit present", () => {
-    const result = guard.check({ toolCallId: "tc-6", toolName: "bash", sessionId });
+  it("allows edit/write when permit matches the bound lease", () => {
+    const result = guard.check({ toolCallId: "tc-6", toolName: "write", sessionId });
+    expect(result.decision).toBe("allow");
+  });
+
+  it("denies bash without an exact approved command", () => {
+    const result = guard.check({ toolCallId: "tc-6b", toolName: "bash", sessionId, command: "npm test" });
+    expect(result.decision).toBe("deny");
+  });
+
+  it("records a receipt for the checked call", () => {
+    expect(guard.receipts.some((r) => r.toolCallId === "tc-6" && r.decision === "allow")).toBe(true);
+  });
+
+  it("denies when the permit binds to another lease", () => {
+    const other = registerWorkerGuard(
+      { kind: "mutation", permit: { leaseId: "lease-other", fencingToken: 1 } },
+      {
+        sessionId,
+        lease: { leaseId: "lease-1", root: "/tmp", fencingToken: 1, expiresAt: Date.now() + 60_000 },
+      },
+    );
+    const result = other.check({ toolCallId: "tc-7", toolName: "write", sessionId });
+    expect(result.decision).toBe("deny");
+  });
+});
+
+// ─── mutation lease-root and assignment binding ───────────────────────────
+
+describe("worker-guard — mutation lease binding", () => {
+  const sessionId = "bind-session";
+
+  it("denies when the lease root is empty", () => {
+    const guard = registerWorkerGuard(
+      { kind: "mutation", permit: { leaseId: "lease-1", fencingToken: 1 } },
+      {
+        sessionId,
+        lease: { leaseId: "lease-1", root: "", fencingToken: 1, expiresAt: Date.now() + 60_000 },
+      },
+    );
+    const result = guard.check({ toolCallId: "tc-b1", toolName: "write", sessionId });
+    expect(result.decision).toBe("deny");
+    if (result.decision === "deny") expect(result.reason).toContain("non-empty lease root");
+  });
+
+  it("denies when the lease assignment mismatches the expected assignment", () => {
+    const guard = registerWorkerGuard(
+      { kind: "mutation", permit: { leaseId: "lease-1", fencingToken: 1 } },
+      {
+        sessionId,
+        assignmentId: "asgn-1",
+        lease: {
+          leaseId: "lease-1",
+          root: "/tmp",
+          fencingToken: 1,
+          expiresAt: Date.now() + 60_000,
+          assignmentId: "asgn-other",
+        },
+      },
+    );
+    const result = guard.check({ toolCallId: "tc-b2", toolName: "write", sessionId });
+    expect(result.decision).toBe("deny");
+    if (result.decision === "deny") expect(result.reason).toContain("assignment mismatch");
+  });
+
+  it("denies when the event assignment mismatches the expected assignment", () => {
+    const guard = registerWorkerGuard(
+      { kind: "mutation", permit: { leaseId: "lease-1", fencingToken: 1 } },
+      {
+        sessionId,
+        assignmentId: "asgn-1",
+        lease: { leaseId: "lease-1", root: "/tmp", fencingToken: 1, expiresAt: Date.now() + 60_000 },
+      },
+    );
+    const result = guard.check({
+      toolCallId: "tc-b3",
+      toolName: "write",
+      sessionId,
+      assignmentId: "asgn-other",
+    });
+    expect(result.decision).toBe("deny");
+  });
+
+  it("allows when lease and event assignments agree", () => {
+    const guard = registerWorkerGuard(
+      { kind: "mutation", permit: { leaseId: "lease-1", fencingToken: 1 } },
+      {
+        sessionId,
+        assignmentId: "asgn-1",
+        lease: {
+          leaseId: "lease-1",
+          root: "/tmp",
+          fencingToken: 1,
+          expiresAt: Date.now() + 60_000,
+          assignmentId: "asgn-1",
+        },
+      },
+    );
+    const result = guard.check({
+      toolCallId: "tc-b4",
+      toolName: "write",
+      sessionId,
+      assignmentId: "asgn-1",
+    });
     expect(result.decision).toBe("allow");
   });
 });
