@@ -1,5 +1,12 @@
-import { describe, it } from "vitest";
+import { describe, it, afterAll } from "vitest";
 import assert from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { GoalStore } from "../../src/store/goal-store.js";
+import { createGoalRecord } from "../../src/domain/goal-record.js";
+import { acquireDriverLeasePersisted, releaseDriverLeasePersisted } from "../../src/runtime/driver.js";
+import { startGoal } from "../../src/runtime/lifecycle.js";
 import type { GoalRecord, GoalId, ISO8601, RevisionRef } from "../../src/domain/types.js";
 import {
   acquireDriverLease,
@@ -195,7 +202,14 @@ describe("validateFencedEvent", () => {
     acquireDriverLease(r, "s", { ttlMs: 60_000 });
     const result = validateFencedEvent(r, { type: "AssignmentCompleted", driverFence: 42 });
     expect(result.ok).toEqual(false);
-    expect((result as any).reason.includes("fence mismatch")).toBeTruthy();
+    if (!result.ok) {
+      // Log-safe reason: no token numbers; exact tokens ride typed fields.
+      expect(result.reason).toEqual("stale driver fence");
+      expect(result.reason).not.toContain("42");
+      expect(result.code).toEqual("STALE_DRIVER_FENCE");
+      expect(result.eventFence).toEqual(42);
+      expect(result.leaseFence).toEqual(1);
+    }
   });
 
   it("rejects when no active lease", () => {
@@ -236,5 +250,95 @@ describe("fence counter monotonicity", () => {
     heartbeatDriverLease(r, "a", { ttlMs: 60_000 });
     expect(r.driverFenceCounter).toEqual(1);
     expect(r.activeDriverLease!.fencingToken).toEqual(1);
+  });
+});
+
+describe("persisted driver lease (CAS through GoalStore)", () => {
+  const persistDirs: string[] = [];
+  afterAll(() => {
+    for (const dir of persistDirs) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function setup() {
+    const dir = mkdtempSync(join(tmpdir(), "keystone-driver-persist-"));
+    persistDirs.push(dir);
+    const store = new GoalStore(dir);
+    const goalId = "goal-persist" as GoalId;
+    startGoal(store, goalId, createGoalRecord(goalId, "task", {
+      requestedRoot: "/tmp",
+      canonicalRoot: "/tmp",
+      projectKey: "abc" as never,
+      vcs: "git",
+    }, REVISION), []);
+    return { store, goalId, acquireDriverLeasePersisted, releaseDriverLeasePersisted };
+  }
+
+  it("acquire persists lease + counter visible on re-read", () => {
+    const { store, goalId, acquireDriverLeasePersisted } = setup();
+    const updated = acquireDriverLeasePersisted(store, goalId, "session-A", { ttlMs: 60_000 });
+    expect(updated.activeDriverLease!.sessionId).toBe("session-A");
+    expect(updated.activeDriverLease!.fencingToken).toBe(1);
+    expect(updated.driverFenceCounter).toBe(1);
+    const reread = store.get(goalId)!;
+    expect(reread.activeDriverLease).toEqual(updated.activeDriverLease);
+    expect(reread.driverFenceCounter).toBe(1);
+  });
+
+  it("same-session heartbeat persists extended expiry without counter bump", () => {
+    const { store, goalId, acquireDriverLeasePersisted } = setup();
+    acquireDriverLeasePersisted(store, goalId, "session-A", { ttlMs: 1000 });
+    const before = store.get(goalId)!;
+    const updated = acquireDriverLeasePersisted(store, goalId, "session-A", { ttlMs: 60_000 });
+    expect(updated.activeDriverLease!.fencingToken).toBe(1);
+    expect(updated.driverFenceCounter).toBe(1);
+    expect(
+      new Date(updated.activeDriverLease!.expiresAt).getTime() >=
+      new Date(before.activeDriverLease!.expiresAt).getTime(),
+    ).toBe(true);
+  });
+
+  it("different session rejected with no write", () => {
+    const { store, goalId, acquireDriverLeasePersisted } = setup();
+    acquireDriverLeasePersisted(store, goalId, "session-A", { ttlMs: 60_000 });
+    const versionBefore = store.get(goalId)!.recordVersion;
+    const same = acquireDriverLeasePersisted(store, goalId, "session-B", { ttlMs: 60_000 });
+    expect(same.activeDriverLease!.sessionId).toBe("session-A");
+    expect(store.get(goalId)!.recordVersion).toBe(versionBefore);
+  });
+
+  it("release persists lease clearance", () => {
+    const { store, goalId, acquireDriverLeasePersisted, releaseDriverLeasePersisted } = setup();
+    const acquired = acquireDriverLeasePersisted(store, goalId, "session-A", { ttlMs: 60_000 });
+    const lease = acquired.activeDriverLease!;
+    const released = releaseDriverLeasePersisted(store, goalId, {
+      leaseId: lease.leaseId,
+      sessionId: lease.sessionId,
+      fencingToken: lease.fencingToken,
+    });
+    expect(released.activeDriverLease).toBeUndefined();
+    expect(store.get(goalId)!.activeDriverLease).toBeUndefined();
+  });
+
+  it("stale release cannot clear a newer session lease", () => {
+    const { store, goalId, acquireDriverLeasePersisted, releaseDriverLeasePersisted } = setup();
+    const first = acquireDriverLeasePersisted(store, goalId, "session-A", { ttlMs: 60_000 });
+    const oldLease = first.activeDriverLease!;
+    const rec = store.get(goalId)!;
+    store.update(goalId, {
+      type: "DriverLeaseAcquired",
+      lease: { ...oldLease, expiresAt: "2000-01-01T00:00:00.000Z" as any },
+      fenceCounter: rec.driverFenceCounter,
+    });
+    const second = acquireDriverLeasePersisted(store, goalId, "session-B", { ttlMs: 60_000 });
+    expect(second.activeDriverLease?.sessionId).toBe("session-B");
+    expect(second.activeDriverLease?.fencingToken).toBeGreaterThan(oldLease.fencingToken);
+
+    const afterStaleRelease = releaseDriverLeasePersisted(store, goalId, {
+      leaseId: oldLease.leaseId,
+      sessionId: oldLease.sessionId,
+      fencingToken: oldLease.fencingToken,
+    });
+    expect(afterStaleRelease.activeDriverLease?.sessionId).toBe("session-B");
+    expect(afterStaleRelease.activeDriverLease?.leaseId).toBe(second.activeDriverLease?.leaseId);
   });
 });

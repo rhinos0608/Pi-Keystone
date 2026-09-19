@@ -1,6 +1,6 @@
 // Validation helpers for GoalRecord
 
-import type { GoalRecord, GoalState, GoalId, ISO8601 } from "./types.js";
+import type { GoalRecord, GoalState, GoalId, ISO8601, AssignmentId, AssignmentState } from "./types.js";
 
 // All terminal states — no transitions allowed from these
 const TERMINAL_STATES: ReadonlySet<GoalState> = new Set([
@@ -40,7 +40,7 @@ const TRANSITIONS = new Map<GoalState, Set<GoalState>>([
   ["READY", new Set(["EXECUTING", "BLOCKED", "FAILED", "CANCELLING"])],
   [
     "EXECUTING",
-    new Set(["VERIFYING", "BLOCKED", "FAILED", "CANCELLING"]),
+    new Set(["VERIFYING", "PAUSED", "BLOCKED", "FAILED", "CANCELLING"]),
   ],
   [
     "VERIFYING",
@@ -48,20 +48,20 @@ const TRANSITIONS = new Map<GoalState, Set<GoalState>>([
   ],
   [
     "REVIEWING",
-    new Set(["ADJUDICATING", "FINAL_AUDIT", "BLOCKED", "FAILED"]),
+    new Set(["VERIFYING", "ADJUDICATING", "FINAL_AUDIT", "COMPLETION_GATE", "BLOCKED", "FAILED"]),
   ],
   [
     "ADJUDICATING",
-    new Set(["REPAIRING", "REVIEWING", "FINAL_AUDIT", "BLOCKED", "FAILED", "NON_CONVERGENT"]),
+    new Set(["VERIFYING", "REPAIRING", "REVIEWING", "FINAL_AUDIT", "COMPLETION_GATE", "BLOCKED", "FAILED", "NON_CONVERGENT"]),
   ],
   ["REPAIRING", new Set(["VERIFYING", "NON_CONVERGENT", "BLOCKED", "FAILED"])],
   [
     "FINAL_AUDIT",
-    new Set(["COMPLETION_GATE", "ADJUDICATING", "BLOCKED", "FAILED", "NON_CONVERGENT"]),
+    new Set(["VERIFYING", "COMPLETION_GATE", "ADJUDICATING", "BLOCKED", "FAILED", "NON_CONVERGENT"]),
   ],
   [
     "COMPLETION_GATE",
-    new Set(["DONE", "REPAIRING", "PAUSED", "BLOCKED", "FAILED", "CANCELLING"]),
+    new Set(["VERIFYING", "DONE", "REPAIRING", "PAUSED", "BLOCKED", "FAILED", "CANCELLING"]),
   ],
   ["PAUSED", new Set(["RECONCILING", "CANCELLING", "FAILED"])],
   // CANCELLING only allows CANCELLED (via CancellationSettled) or FAILED (fatal)
@@ -94,6 +94,11 @@ export function createGoalRecord(
     recoveryRequired: false,
     planEpoch: 0,
     contractVersion: null,
+    lifecycleDepth: null,
+    depthProposalRef: null,
+    preparedFlowRef: null,
+    repairReasonRef: undefined,
+    repairVerificationPending: false,
     activeContractRef: null,
     baselineRef: null,
     snapshotRefs: [],
@@ -120,6 +125,9 @@ export function createGoalRecord(
     },
     driverFenceCounter: 0,
     mutationFenceCounter: 0,
+    assignmentStates: {},
+    activeRuns: {},
+    executionPlan: null,
     reviewCycles: 0,
     repairCycles: 0,
     finalAuditAttempts: 0,
@@ -174,4 +182,41 @@ export function validateTransition(
   }
 
   return { valid: true };
+}
+
+// ─── Per-assignment frontier (Task 1) ───────────────────────────────────────
+
+/** Assignment states that count as terminal for frontier gating. */
+export const ASSIGNMENT_TERMINAL_STATES: ReadonlySet<AssignmentState> = new Set([
+  "COMPLETED",
+  "FAILED",
+  "CANCELLED",
+]);
+
+export function isAssignmentTerminal(state: AssignmentState | undefined): boolean {
+  return state !== undefined && ASSIGNMENT_TERMINAL_STATES.has(state);
+}
+
+/**
+ * True when every assignment in the current plan epoch's required frontier
+ * has reached a terminal assignment state.
+ *
+ * The frontier is the executionPlan DAG snapshot when present; otherwise it
+ * falls back to the tracked assignmentStates keys (single-assignment goals
+ * with no plan snapshot gate on the assignments actually completed).
+ */
+export function isExecutionFrontierTerminal(record: GoalRecord): boolean {
+  const plan = record.executionPlan;
+  if (plan && plan.assignments.length > 0) {
+    return plan.assignments.every((a) =>
+      isAssignmentTerminal(record.assignmentStates[a.id]),
+    );
+  }
+  const tracked = Object.values(record.assignmentStates);
+  if (tracked.length === 0) return false;
+  return tracked.every((s) => isAssignmentTerminal(s));
+}
+
+export function isTerminalState(state: GoalState): boolean {
+  return TERMINAL_STATES.has(state);
 }

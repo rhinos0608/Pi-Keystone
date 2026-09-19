@@ -5,8 +5,20 @@
  * auditor identity and enforce write permissions.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { writeAtomicJson } from "../store/atomic-json.js";
+import { withLock } from "../store/directory-lock.js";
+
+/** Index file exists but cannot be trusted: parse failure or schema mismatch. */
+export class AssignmentIndexCorruptionError extends Error {
+  readonly code = "ASSIGNMENT_INDEX_CORRUPTION" as const;
+  readonly filePath: string;
+  constructor(filePath: string, reason: string) {
+    super(`Assignment index at ${filePath} is corrupt: ${reason}`);
+    this.name = "AssignmentIndexCorruptionError";
+    this.filePath = filePath;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // IndexEntry
@@ -52,43 +64,63 @@ export function appendEntry(
 // Persistence (JSON file)
 // ---------------------------------------------------------------------------
 
-/** Load index from disk; returns empty index when file is absent. */
+/** Load index from disk; returns empty index only when file is absent. */
 export function loadIndex(filePath: string): AssignmentIndex {
   if (!existsSync(filePath)) {
     return createEmptyIndex();
   }
+  let raw: string;
   try {
-    const raw = readFileSync(filePath, "utf-8");
-    const parsed = JSON.parse(raw);
-    if (
-      parsed &&
-      typeof parsed === "object" &&
-      parsed.version === 1 &&
-      Array.isArray(parsed.entries)
-    ) {
-      return { version: 1, entries: parsed.entries };
-    }
-  } catch {
-    // corrupt file → return empty, caller can decide policy
+    raw = readFileSync(filePath, "utf-8");
+  } catch (err: unknown) {
+    throw new AssignmentIndexCorruptionError(
+      filePath,
+      `unreadable file: ${(err as Error)?.message ?? String(err)}`,
+    );
   }
-  return createEmptyIndex();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err: unknown) {
+    throw new AssignmentIndexCorruptionError(
+      filePath,
+      `unparseable JSON: ${(err as Error)?.message ?? String(err)}`,
+    );
+  }
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    (parsed as AssignmentIndex).version === 1 &&
+    Array.isArray((parsed as AssignmentIndex).entries)
+  ) {
+    return { version: 1, entries: (parsed as AssignmentIndex).entries };
+  }
+  throw new AssignmentIndexCorruptionError(
+    filePath,
+    "schema mismatch: expected { version: 1, entries: [] }",
+  );
 }
 
-/** Save index to disk. Creates parent dirs. */
+/** Save index to disk atomically (tmp + rename; crash never corrupts target). */
 export function saveIndex(filePath: string, index: AssignmentIndex): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, JSON.stringify(index, null, 2) + "\n", "utf-8");
+  writeAtomicJson(filePath, { version: 1, entries: [...index.entries] });
 }
 
-/** Atomic append: load → append → save. Returns new index. */
+/**
+ * Atomic append: load → append → save. Runs inside a directory-lock
+ * critical section on the index file, so concurrent processes cannot
+ * interleave read-modify-write cycles and lose entries. Returns new index.
+ */
 export function appendAndSave(
   filePath: string,
   entry: Omit<AssignmentIndexEntry, "appendedAt">,
 ): AssignmentIndex {
-  const current = loadIndex(filePath);
-  const next = appendEntry(current, entry);
-  saveIndex(filePath, next);
-  return next;
+  return withLock(filePath, () => {
+    const current = loadIndex(filePath);
+    const next = appendEntry(current, entry);
+    saveIndex(filePath, next);
+    return next;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -142,15 +174,20 @@ export function isLauncher(sessionId: string): boolean {
 }
 
 /**
- * Append only if sessionId is a registered launcher.
+ * Append only if the CALLER is a registered launcher.
+ * Authorizes `callerSessionId` (the parent launcher identity) — never the
+ * session id claimed inside the entry, which is caller-supplied data.
+ * The stored entry is stamped with the caller identity. `callerSessionId`
+ * is REQUIRED: there is no self-claim fallback.
  * Throws if not authorised.
  */
 export function launcherAppend(
   filePath: string,
   entry: Omit<AssignmentIndexEntry, "appendedAt">,
+  callerSessionId: string,
 ): AssignmentIndex {
-  if (!isLauncher(entry.sessionId)) {
-    throw new Error(`Session "${entry.sessionId}" is not a registered launcher`);
+  if (!isLauncher(callerSessionId)) {
+    throw new Error(`Session "${callerSessionId}" is not a registered launcher`);
   }
-  return appendAndSave(filePath, entry);
+  return appendAndSave(filePath, { ...entry, sessionId: callerSessionId });
 }

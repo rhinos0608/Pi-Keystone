@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { AssignmentId, ArtifactRef } from "../../src/domain/types.js";
@@ -14,6 +14,7 @@ import {
   appendAndSave,
   loadIndex,
   saveIndex,
+  AssignmentIndexCorruptionError,
   findBySession,
   findByRole,
   findByRunId,
@@ -190,6 +191,28 @@ describe("AssignmentIndex — persistence (file)", () => {
     expect(loaded.entries).toHaveLength(0);
   });
 
+  // Task 1: corrupt index is an explicit typed error, never silently empty.
+  it("loadIndex throws AssignmentIndexCorruptionError on unparseable JSON", () => {
+    const fpath = join(dir, "corrupt.json");
+    writeFileSync(fpath, "{ broken json", "utf-8");
+    expect(() => loadIndex(fpath)).toThrowError(AssignmentIndexCorruptionError);
+  });
+
+  it("loadIndex throws AssignmentIndexCorruptionError on schema mismatch", () => {
+    const fpath = join(dir, "wrong-schema.json");
+    writeFileSync(fpath, JSON.stringify({ version: 999, entries: [] }), "utf-8");
+    expect(() => loadIndex(fpath)).toThrowError(AssignmentIndexCorruptionError);
+  });
+
+  // Task 1: writes are atomic (tmp + rename) — no stray tmp files survive.
+  it("saveIndex leaves no tmp files behind", () => {
+    const fpath = join(dir, "atomic.json");
+    saveIndex(fpath, createEmptyIndex());
+    const leftovers = readdirSync(dir).filter((f) => f.endsWith(".tmp") || f.includes(".tmp."));
+    expect(leftovers).toEqual([]);
+    expect(loadIndex(fpath).entries).toHaveLength(0);
+  });
+
   it("appendAndSave accumulates across calls", () => {
     const fpath = join(dir, "atomic.json");
     const idx1 = appendAndSave(fpath, {
@@ -273,8 +296,36 @@ describe("AssignmentIndex — launcher-only write enforcement", () => {
       role: "auditor",
       planEpoch: 0,
       mutationCapable: true,
-    });
+    }, "s1");
     expect(idx.entries).toHaveLength(1);
+    expect(idx.entries[0].sessionId).toBe("s1");
+  });
+
+  it("launcherAppend stamps the caller identity over the entry claim", () => {
+    const fpath = join(dir, "stamped.json");
+    registerLauncher("s1");
+    const idx = launcherAppend(fpath, {
+      runId: "r1",
+      sessionId: "evil-claim",
+      role: "auditor",
+      planEpoch: 0,
+      mutationCapable: true,
+    }, "s1");
+    expect(idx.entries[0].sessionId).toBe("s1");
+  });
+
+  it("launcherAppend leaves no lock debris behind", () => {
+    const fpath = join(dir, "locked.json");
+    registerLauncher("s1");
+    launcherAppend(fpath, {
+      runId: "r1",
+      sessionId: "s1",
+      role: "auditor",
+      planEpoch: 0,
+      mutationCapable: true,
+    }, "s1");
+    const leftovers = readdirSync(dir).filter((f) => f.endsWith(".lock") || f.includes(".tmp"));
+    expect(leftovers).toEqual([]);
   });
 
   it("launcherAppend throws for unregistered session", () => {
@@ -282,12 +333,28 @@ describe("AssignmentIndex — launcher-only write enforcement", () => {
     expect(() =>
       launcherAppend(fpath, {
         runId: "r1",
-        sessionId: "unknown",
+        sessionId: "s1",
         role: "auditor",
         planEpoch: 0,
         mutationCapable: true,
-      }),
+      }, "unknown"),
     ).toThrow("not a registered launcher");
+  });
+
+  it("launcherAppend authorizes the caller, never the entry claim", () => {
+    // Entry claims a registered launcher, but the CALLER is unknown.
+    const fpath = join(dir, "spoof.json");
+    registerLauncher("s1");
+    expect(() =>
+      launcherAppend(fpath, {
+        runId: "r1",
+        sessionId: "s1",
+        role: "auditor",
+        planEpoch: 0,
+        mutationCapable: true,
+      }, "spoofed-caller"),
+    ).toThrow("not a registered launcher");
+    expect(loadIndex(fpath).entries).toHaveLength(0);
   });
 
   it("revoked launcher cannot append", () => {
@@ -301,7 +368,7 @@ describe("AssignmentIndex — launcher-only write enforcement", () => {
         role: "auditor",
         planEpoch: 0,
         mutationCapable: true,
-      }),
+      }, "s2"),
     ).toThrow("not a registered launcher");
   });
 });

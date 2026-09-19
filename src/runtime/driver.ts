@@ -1,7 +1,8 @@
 // Goal driver — fenced lease management
 // Operates on GoalRecord from src/domain/types.ts
 
-import type { GoalRecord, DriverLease, ISO8601 } from "../domain/types.js";
+import type { GoalRecord, GoalId, DriverLease, ISO8601 } from "../domain/types.js";
+import { GoalStore } from "../store/goal-store.js";
 
 declare const crypto: { randomUUID(): string };
 
@@ -111,20 +112,120 @@ export function heartbeatDriverLease(
  * Validate that a GoalEvent's driverFence matches the current active lease.
  * Returns { ok: true } if valid, { ok: false, reason } if rejected.
  * Events without driverFence field always pass.
+ *
+ * The reason string carries no token numbers (log-safe); exact tokens ride
+ * the typed eventFence/leaseFence fields for programmatic use.
  */
 export function validateFencedEvent(
   record: GoalRecord,
   event: { driverFence?: number; type: string },
-): { ok: true } | { ok: false; reason: string } {
+): { ok: true } | { ok: false; reason: string; code: "NO_DRIVER_LEASE" } | { ok: false; reason: string; code: "STALE_DRIVER_FENCE"; eventFence: number; leaseFence: number } {
   if (event.driverFence === undefined) return { ok: true };
   if (!leaseActive(record.activeDriverLease)) {
-    return { ok: false, reason: "no active driver lease" };
+    return { ok: false, reason: "no active driver lease", code: "NO_DRIVER_LEASE" };
   }
   if (event.driverFence !== record.activeDriverLease!.fencingToken) {
     return {
       ok: false,
-      reason: `fence mismatch: event=${event.driverFence} lease=${record.activeDriverLease!.fencingToken}`,
+      reason: "stale driver fence",
+      code: "STALE_DRIVER_FENCE",
+      eventFence: event.driverFence,
+      leaseFence: record.activeDriverLease!.fencingToken,
     };
   }
   return { ok: true };
+}
+
+// ─── Persisted acquisition (CAS through the store) ───────────────────────────
+
+/**
+ * Acquire or heartbeat a driver lease with durable persistence.
+ * Same semantics as acquireDriverLease, but the resulting lease +
+ * fence counter persist via a DriverLeaseAcquired event through a
+ * CAS-guarded GoalStore.update — never a bare object mutation — so the
+ * validateFencedEvent path in dispatchEvent sees the lease on re-read.
+ *
+ * - No active lease (missing or expired) → new lease persisted, counter +1.
+ * - Active lease, same session → heartbeat persisted (expiry extended).
+ * - Active lease, different session → rejected: no write, returns current.
+ */
+export function acquireDriverLeasePersisted(
+  store: GoalStore,
+  goalId: GoalId,
+  sessionId: string,
+  opts?: { ttlMs?: number },
+): GoalRecord {
+  const ttlMs = opts?.ttlMs ?? DEFAULT_TTL_MS;
+  const current = store.get(goalId);
+  if (!current) throw new Error(`Goal ${goalId} not found`);
+  const active = current.activeDriverLease;
+
+  if (active && leaseActive(active)) {
+    if (active.sessionId !== sessionId) return current;
+    const heartbeatAt = now();
+    const expiresAt = expiry(ttlMs);
+    if (heartbeatAt === active.heartbeatAt && expiresAt === active.expiresAt) {
+      return current;
+    }
+    const lease: DriverLease = {
+      ...active,
+      heartbeatAt,
+      expiresAt,
+    };
+    store.update(
+      goalId,
+      { type: "DriverLeaseAcquired", lease, fenceCounter: current.driverFenceCounter },
+      { expectedVersion: current.recordVersion },
+    );
+    return store.get(goalId)!;
+  }
+
+  const fenceCounter = current.driverFenceCounter + 1;
+  const lease: DriverLease = {
+    leaseId: crypto.randomUUID(),
+    sessionId,
+    fencingToken: fenceCounter,
+    acquiredAt: now(),
+    heartbeatAt: now(),
+    expiresAt: expiry(ttlMs),
+  };
+  store.update(
+    goalId,
+    { type: "DriverLeaseAcquired", lease, fenceCounter },
+    { expectedVersion: current.recordVersion },
+  );
+  return store.get(goalId)!;
+}
+
+/**
+ * Release the active driver lease with durable persistence via a
+ * DriverLeaseReleased event (CAS-guarded, no bare object mutation).
+ */
+export type DriverLeaseReleaseExpectation = Pick<
+  DriverLease,
+  "leaseId" | "sessionId" | "fencingToken"
+>;
+
+/**
+ * Release only the exact driver lease the caller owns. A stale cleanup must
+ * never clear a newer session's lease after expiry/fence rotation.
+ */
+export function releaseDriverLeasePersisted(
+  store: GoalStore,
+  goalId: GoalId,
+  expected: DriverLeaseReleaseExpectation,
+): GoalRecord {
+  const current = store.get(goalId);
+  if (!current) throw new Error(`Goal ${goalId} not found`);
+  const active = current.activeDriverLease;
+  if (!active) return current;
+  if (
+    active.leaseId !== expected.leaseId
+    || active.sessionId !== expected.sessionId
+    || active.fencingToken !== expected.fencingToken
+  ) {
+    return current;
+  }
+  store.update(goalId, { type: "DriverLeaseReleased" }, { expectedVersion: current.recordVersion });
+  return store.get(goalId)!;
 }

@@ -3,7 +3,28 @@
 
 import type { GoalRecord, GoalId, GoalEvent } from "../domain/types.js";
 import { validateDriverFence } from "../domain/events.js";
+import { validateFencedEvent } from "./driver.js";
 import { GoalStore, goalReducer, type GoalReducer } from "../store/goal-store.js";
+
+/** Fenced event rejected by the active driver lease (stale token, expired, or missing lease). */
+export class FenceError extends Error {
+  readonly code = "FENCE_REJECTED" as const;
+  constructor(reason: string) {
+    super(`Driver fence rejected: ${reason}`);
+    this.name = "FenceError";
+  }
+}
+
+/** Event dispatched against a terminal goal state. Never a transition. */
+export class TerminalStateError extends Error {
+  readonly code = "TERMINAL_STATE" as const;
+  readonly state: GoalRecord["state"];
+  constructor(state: GoalRecord["state"], eventType: string) {
+    super(`Event ${eventType} rejected: goal is terminal in ${state}`);
+    this.name = "TerminalStateError";
+    this.state = state;
+  }
+}
 
 export type ReceiptEntry = {
   goalId: GoalId;
@@ -26,6 +47,23 @@ export type ReceiptLog = ReceiptEntry[];
  * 5. Persists
  * 6. Appends receipt log entry
  * Returns { record, receipt } or throws.
+ *
+ * Fence-bypass rule: when fencing is active for the goal, a state-changing
+ * event that LACKS driverFence is rejected with FenceError instead of
+ * skipping validation. State-changing = every event type carrying
+ * driverFence in src/domain/types.ts (required or optional). Pure
+ * bookkeeping stays exempt (fence optional): GoalStarted (pre-lease
+ * bootstrap, no fence field), DriverLeaseAcquired / DriverLeaseReleased
+ * (the lease-management channel itself; fencing them would deadlock
+ * acquisition and release).
+ *
+ * NOTE (dead event): ContractCritiqueCompleted carries no driverFence field
+ * and has no reducer case (goal-store applyGoalEvent falls through to
+ * default → IgnoredEventError), so it is currently undispatcheable while
+ * fencing is active: dispatching it then fails with FenceError (missing
+ * fence), and without fencing it fails with IgnoredEventError (no-op).
+ * Do NOT add a reducer case (YAGNI — zero prod callers); either wire the
+ * critique flow with a fence-carrying event or delete the constructor.
  */
 export function dispatchEvent(
   store: GoalStore,
@@ -37,18 +75,42 @@ export function dispatchEvent(
   const current = store.get(goalId);
   if (!current) throw new Error(`Goal ${goalId} not found`);
 
-  // Validate driver fence if event carries one
-  if ("driverFence" in event) {
-    const fence = (event as { driverFence: number }).driverFence;
-    if (!validateDriverFence(event, current.driverFenceCounter)) {
-      throw new Error(
-        `Driver fence mismatch: expected ${current.driverFenceCounter}, got ${fence}`,
-      );
+  if (isTerminal(current)) {
+    throw new TerminalStateError(current.state, event.type);
+  }
+
+  // Fence validation goes through the active-lease validator (lease presence,
+  // expiry, token) once fencing is active for the goal. Goals that never
+  // acquired a driver lease keep the legacy counter check so pre-lease
+  // bootstrap events (fence 0, counter 0) still dispatch.
+  // Bypass close: a state-changing event missing the fence key while fencing
+  // is active is rejected, never silently unvalidated.
+  const fencingActive =
+    current.activeDriverLease !== undefined || current.driverFenceCounter > 0;
+  if ("driverFence" in event && event.driverFence !== undefined) {
+    if (fencingActive) {
+      const check = validateFencedEvent(current, { type: event.type, driverFence: event.driverFence });
+      if (!check.ok) throw new FenceError(check.reason); // reasons are log-safe (no tokens)
+    } else if (!validateDriverFence(event, current.driverFenceCounter)) {
+      throw new FenceError("fence mismatch: expected counter token does not match event");
     }
+  } else if (
+    fencingActive &&
+    event.type !== "GoalStarted" &&
+    event.type !== "DriverLeaseAcquired" &&
+    event.type !== "DriverLeaseReleased"
+  ) {
+    throw new FenceError(
+      `missing driverFence for state-changing event ${event.type} while fencing is active`,
+    );
   }
 
   const fromState = current.state;
-  const updated = store.update(goalId, event, reducer);
+  // Compare-and-swap on the version read above: a concurrent writer between
+  // this read and the persist fails with VersionConflictError, no write.
+  const updated = store.update(goalId, event, reducer, {
+    expectedVersion: current.recordVersion,
+  });
 
   const receipt: ReceiptEntry = {
     goalId,
@@ -82,7 +144,7 @@ export function startGoal(
 /**
  * Retrieve the current state of a goal (read-only).
  */
-export function getGoalState(store: GoalStore, goalId: GoalId): GoalRecord | undefined {
+export function getGoalState(store: GoalStore, goalId: GoalId): GoalRecord | null {
   return store.get(goalId);
 }
 

@@ -9,6 +9,12 @@ import type {
   ISO8601,
 } from "../../src/domain/types.js";
 import { createGoalRecord } from "../../src/domain/goal-record.js";
+import { GoalStore } from "../../src/store/goal-store.js";
+import { IgnoredEventError } from "../../src/store/goal-store.js";
+import type { ReceiptLog } from "../../src/runtime/lifecycle.js";
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 import {
   settleCancellation,
@@ -55,6 +61,13 @@ function makeGoal(overrides: Partial<GoalRecord> = {}): GoalRecord {
     fakeRevision(),
   );
   return { ...base, ...overrides };
+}
+
+/** Persist a goal to a throwaway GoalStore; returns the store and goal id. */
+function persistGoal(record: GoalRecord): { store: GoalStore; goalId: GoalId } {
+  const store = new GoalStore(mkdtempSync(join(tmpdir(), "keystone-recovery-")));
+  store.create(record.goalId, record);
+  return { store, goalId: record.goalId };
 }
 
 function makeMutationLease(
@@ -118,13 +131,13 @@ describe("settleCancellation", () => {
     expect(result!.outcome).toEqual("SETTLED");
   });
 
-  it("returns ROLLED_BACK when mutation is in MUTATING phase and not expired", () => {
+  it("returns INDETERMINATE when mutation is in MUTATING phase and not expired (no rollback proof)", () => {
     const goal = makeGoal({
       state: "CANCELLING",
       activeMutationLease: makeMutationLease({ phase: "MUTATING" }),
     });
     const result = settleCancellation(goal, iso());
-    expect(result!.outcome).toEqual("ROLLED_BACK");
+    expect(result!.outcome).toEqual("INDETERMINATE");
   });
 
   it("returns INDETERMINATE when mutation lease is expired", () => {
@@ -216,6 +229,7 @@ describe("detectRecoveryIssues", () => {
     const issues = detectRecoveryIssues([goal], iso());
     expect(issues.length).toEqual(1);
     expect(issues[0].kind).toEqual("stale_mutation_lease");
+    expect(issues[0]).toMatchObject({ phase: "MUTATING" });
   });
 
   it("detects stale recovery_required flag", () => {
@@ -263,25 +277,45 @@ describe("detectRecoveryIssues", () => {
 });
 
 describe("repair", () => {
-  it("repairOrphanedDriverLease clears lease and bumps version", () => {
-    const goal = makeGoal({
+  // Task 1: repairs are persistent audited store writes (CAS + receipt log),
+  // never direct object mutation. These tests drive the new (store, goalId)
+  // signature against a real GoalStore.
+  it("repairOrphanedDriverLease clears lease, persists, bumps version, logs receipt", () => {
+    const { store, goalId } = persistGoal(makeGoal({
       activeDriverLease: makeDriverLease(),
       recordVersion: 5,
-    });
-    const patched = repairOrphanedDriverLease(goal);
+    }));
+    const log: ReceiptLog = [];
+    const patched = repairOrphanedDriverLease(store, goalId, log);
     expect(patched.activeDriverLease).toEqual(undefined);
     expect(patched.recoveryRequired).toEqual(true);
     expect(patched.recordVersion).toEqual(6);
+    // Persistent: re-read from disk shows the repair.
+    expect(store.get(goalId)?.activeDriverLease).toEqual(undefined);
+    // Audited: receipt entry appended, no fake state transition.
+    expect(log).toHaveLength(1);
+    expect(log[0].eventType).toBe("Recovery:driver-lease");
+    expect(log[0].fromState).toBe(log[0].toState);
   });
 
-  it("repairStaleMutationLease clears lease and bumps version", () => {
-    const goal = makeGoal({
+  it("repairStaleMutationLease clears lease, persists, bumps version, logs receipt", () => {
+    const { store, goalId } = persistGoal(makeGoal({
       activeMutationLease: makeMutationLease(),
       recordVersion: 3,
-    });
-    const patched = repairStaleMutationLease(goal);
+    }));
+    const log: ReceiptLog = [];
+    const patched = repairStaleMutationLease(store, goalId, log);
     expect(patched.activeMutationLease).toEqual(undefined);
     expect(patched.recoveryRequired).toEqual(true);
     expect(patched.recordVersion).toEqual(4);
+    expect(store.get(goalId)?.activeMutationLease).toEqual(undefined);
+    expect(log).toHaveLength(1);
+    expect(log[0].eventType).toBe("Recovery:mutation-lease");
+  });
+
+  it("repair with no such lease throws IgnoredEventError and writes nothing", () => {
+    const { store, goalId } = persistGoal(makeGoal({ recordVersion: 7 }));
+    expect(() => repairOrphanedDriverLease(store, goalId)).toThrowError(IgnoredEventError);
+    expect(store.get(goalId)?.recordVersion).toBe(7);
   });
 });

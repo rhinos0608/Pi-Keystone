@@ -4,6 +4,8 @@ import type {
   GoalEvent,
   ArtifactRef,
   AssignmentId,
+  DriverLease,
+  ExecutionPlanSnapshot,
   FindingId,
   JobStatus,
   RevisionRef,
@@ -32,6 +34,7 @@ export function reconciliationCompleted(opts: {
   provisionalPlanRef: ArtifactRef;
   basedOnRevision: RevisionRef;
   decision: "ACCEPT_PLAN_BASIS" | "REPLAN" | "BLOCK";
+  driverFence?: number;
 }): GoalEvent {
   return { type: "ReconciliationCompleted", ...opts };
 }
@@ -47,49 +50,20 @@ export function contractCritiqueCompleted(opts: {
 export function contractFrozen(opts: {
   contractVersion: number;
   contractRef: ArtifactRef;
+  driverFence?: number;
 }): GoalEvent {
   return { type: "ContractFrozen", ...opts };
 }
 
-export function contractAmendmentProposed(opts: {
-  amendmentRef: ArtifactRef;
-  fromVersion: number;
-  proposedVersion: number;
-  proposer: "USER" | "KEYSTONE";
-  authorizationRef: ArtifactRef;
-}): GoalEvent {
-  return { type: "ContractAmendmentProposed", ...opts };
-}
-
-export function contractAmendmentApproved(opts: {
-  amendmentRef: ArtifactRef;
-  approvalRef: ArtifactRef;
-  approvedBy: "USER" | "POLICY";
-}): GoalEvent {
-  return { type: "ContractAmendmentApproved", ...opts };
-}
-
-export function contractAmendmentRejected(opts: {
-  amendmentRef: ArtifactRef;
-  rejectionRef: ArtifactRef;
-  rejectedBy: "USER" | "POLICY";
-}): GoalEvent {
-  return { type: "ContractAmendmentRejected", ...opts };
-}
-
-export function contractAmendmentFrozen(opts: {
-  amendmentRef: ArtifactRef;
-  contractVersion: number;
-  contractRef: ArtifactRef;
-  criticRunId: string;
-}): GoalEvent {
-  return { type: "ContractAmendmentFrozen", ...opts };
-}
+// ContractAmendment* constructors removed (Round-3): zero prod + zero test
+// callers; the GoalEvent union members in domain/types.ts (schema-frozen)
+// remain, constructed inline if the amendment flow is ever wired.
 
 export function executionStarted(opts: {
   contractVersion: number;
   executionPlanRef: ArtifactRef;
   driverFence: number;
+  assignments?: ExecutionPlanSnapshot["assignments"];
 }): GoalEvent {
   return { type: "ExecutionStarted", ...opts };
 }
@@ -100,6 +74,25 @@ export function assignmentCompleted(opts: {
   driverFence: number;
 }): GoalEvent {
   return { type: "AssignmentCompleted", ...opts };
+}
+
+export function assignmentFailed(opts: {
+  assignmentId: AssignmentId;
+  errorRef?: ArtifactRef;
+  driverFence: number;
+}): GoalEvent {
+  return { type: "AssignmentFailed", ...opts };
+}
+
+export function driverLeaseAcquired(opts: {
+  lease: DriverLease;
+  fenceCounter: number;
+}): GoalEvent {
+  return { type: "DriverLeaseAcquired", ...opts };
+}
+
+export function driverLeaseReleased(): GoalEvent {
+  return { type: "DriverLeaseReleased" };
 }
 
 export function verificationCompleted(opts: {
@@ -125,6 +118,13 @@ export function adjudicationCompleted(opts: {
   return { type: "AdjudicationCompleted", ...opts };
 }
 
+export function repairRequested(opts: {
+  reasonRef: ArtifactRef;
+  driverFence: number;
+}): GoalEvent {
+  return { type: "RepairRequested", ...opts };
+}
+
 export function repairCompleted(opts: {
   assignmentId: AssignmentId;
   reportRef: ArtifactRef;
@@ -133,13 +133,8 @@ export function repairCompleted(opts: {
   return { type: "RepairCompleted", ...opts };
 }
 
-export function finalAuditRoundStarted(opts: {
-  round: number;
-  assignmentRefs: [ArtifactRef, ArtifactRef];
-  driverFence: number;
-}): GoalEvent {
-  return { type: "FinalAuditRoundStarted", ...opts };
-}
+// finalAuditRoundStarted removed (Round-3): zero prod + zero test callers;
+// the union member in domain/types.ts (schema-frozen) remains.
 
 export function finalAuditCompleted(opts: {
   auditRefs: [ArtifactRef, ArtifactRef];
@@ -157,35 +152,48 @@ export function completionEvaluated(opts: {
   return { type: "CompletionEvaluated", ...opts };
 }
 
-export function pauseRequested(reason: string): GoalEvent {
-  return { type: "PauseRequested", reason };
+export function pauseRequested(reason: string, driverFence?: number): GoalEvent {
+  return driverFence === undefined
+    ? { type: "PauseRequested", reason }
+    : { type: "PauseRequested", reason, driverFence };
 }
 
-export function resumeRequested(): GoalEvent {
-  return { type: "ResumeRequested" };
+export function resumeRequested(driverFence?: number): GoalEvent {
+  return driverFence === undefined
+    ? { type: "ResumeRequested" }
+    : { type: "ResumeRequested", driverFence };
 }
 
-export function cancelRequested(reason?: string): GoalEvent {
-  return { type: "CancelRequested", reason };
+export function cancelRequested(reason?: string, driverFence?: number): GoalEvent {
+  return driverFence === undefined
+    ? { type: "CancelRequested", reason }
+    : { type: "CancelRequested", reason, driverFence };
 }
 
 export function cancellationSettled(opts: {
   cleanupRef: ArtifactRef;
   mutationOutcome: "SETTLED" | "ROLLED_BACK" | "INDETERMINATE";
+  driverFence?: number;
 }): GoalEvent {
   return { type: "CancellationSettled", ...opts };
 }
 
-export function fatalError(errorRef: ArtifactRef): GoalEvent {
-  return { type: "FatalError", errorRef };
+export function fatalError(errorRef: ArtifactRef, driverFence?: number): GoalEvent {
+  return driverFence === undefined
+    ? { type: "FatalError", errorRef }
+    : { type: "FatalError", errorRef, driverFence };
 }
 
-export function blockDeclared(blockerRefs: ArtifactRef[]): GoalEvent {
-  return { type: "BlockDeclared", blockerRefs };
+export function blockDeclared(blockerRefs: ArtifactRef[], driverFence?: number): GoalEvent {
+  return driverFence === undefined
+    ? { type: "BlockDeclared", blockerRefs }
+    : { type: "BlockDeclared", blockerRefs, driverFence };
 }
 
-export function convergenceLimitReached(evidenceRef: ArtifactRef): GoalEvent {
-  return { type: "ConvergenceLimitReached", evidenceRef };
+export function convergenceLimitReached(evidenceRef: ArtifactRef, driverFence?: number): GoalEvent {
+  return driverFence === undefined
+    ? { type: "ConvergenceLimitReached", evidenceRef }
+    : { type: "ConvergenceLimitReached", evidenceRef, driverFence };
 }
 
 /**

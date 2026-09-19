@@ -12,6 +12,8 @@ type ISO8601 = string & { readonly __brand: "ISO8601" };
 
 // ─── §3A — Goal state machine ─────────────────────────────────────────────
 
+type LifecycleDepth = "quick" | "standard" | "full";
+
 type GoalState =
   | "CREATED"
   | "PREPARING"
@@ -35,6 +37,8 @@ type GoalState =
 
 type GoalEvent =
   | { type: "GoalStarted" }
+  | { type: "PreparedFlowStored"; flowRef: ArtifactRef; baselineRef: ArtifactRef; driverFence?: number }
+  | { type: "LifecycleDepthApproved"; depth: LifecycleDepth; proposalRef: ArtifactRef; approvedBy: "USER"; driverFence?: number }
   | {
       type: "PreparationProgress";
       job: "baseline" | "plan";
@@ -53,9 +57,10 @@ type GoalEvent =
       provisionalPlanRef: ArtifactRef;
       basedOnRevision: RevisionRef;
       decision: "ACCEPT_PLAN_BASIS" | "REPLAN" | "BLOCK";
+      driverFence?: number;
     }
   | { type: "ContractCritiqueCompleted"; critiqueRef: ArtifactRef; accepted: boolean; criticRunId: string }
-  | { type: "ContractFrozen"; contractVersion: number; contractRef: ArtifactRef }
+  | { type: "ContractFrozen"; contractVersion: number; contractRef: ArtifactRef; driverFence?: number }
   | {
       type: "ContractAmendmentProposed";
       amendmentRef: ArtifactRef;
@@ -63,26 +68,36 @@ type GoalEvent =
       proposedVersion: number;
       proposer: "USER" | "KEYSTONE";
       authorizationRef: ArtifactRef;
+      driverFence?: number;
     }
-  | { type: "ContractAmendmentApproved"; amendmentRef: ArtifactRef; approvalRef: ArtifactRef; approvedBy: "USER" | "POLICY" }
-  | { type: "ContractAmendmentRejected"; amendmentRef: ArtifactRef; rejectionRef: ArtifactRef; rejectedBy: "USER" | "POLICY" }
-  | { type: "ContractAmendmentFrozen"; amendmentRef: ArtifactRef; contractVersion: number; contractRef: ArtifactRef; criticRunId: string }
-  | { type: "ExecutionStarted"; contractVersion: number; executionPlanRef: ArtifactRef; driverFence: number }
+  | { type: "ContractAmendmentApproved"; amendmentRef: ArtifactRef; approvalRef: ArtifactRef; approvedBy: "USER" | "POLICY"; driverFence?: number }
+  | { type: "ContractAmendmentRejected"; amendmentRef: ArtifactRef; rejectionRef: ArtifactRef; rejectedBy: "USER" | "POLICY"; driverFence?: number }
+  | { type: "ContractAmendmentFrozen"; amendmentRef: ArtifactRef; contractVersion: number; contractRef: ArtifactRef; criticRunId: string; driverFence?: number }
+  | { type: "ExecutionStarted"; contractVersion: number; executionPlanRef: ArtifactRef; driverFence: number; assignments?: ExecutionPlanSnapshot["assignments"] }
+  | { type: "AssignmentRunBound"; assignmentId: AssignmentId; runId: string; sessionId: string; driverFence: number }
   | { type: "AssignmentCompleted"; assignmentId: AssignmentId; reportRef: ArtifactRef; driverFence: number }
+  | { type: "AssignmentFailed"; assignmentId: AssignmentId; errorRef?: ArtifactRef; driverFence: number }
   | { type: "VerificationCompleted"; runRef: ArtifactRef; accepted: boolean; driverFence: number }
+  | { type: "CompletionRecoveryRestarted"; reasonRef: ArtifactRef; driverFence: number }
   | { type: "ReviewCompleted"; reviewRef: ArtifactRef; candidateIds: FindingId[]; driverFence: number }
   | { type: "AdjudicationCompleted"; decisionRefs: ArtifactRef[]; driverFence: number }
+  | { type: "RepairRequested"; reasonRef: ArtifactRef; driverFence: number }
+  | { type: "LifecycleRerouted"; to: "COMPLETION_GATE"; depth: LifecycleDepth; reasonRef: ArtifactRef; driverFence: number }
   | { type: "RepairCompleted"; assignmentId: AssignmentId; reportRef: ArtifactRef; driverFence: number }
   | { type: "FinalAuditRoundStarted"; round: number; assignmentRefs: [ArtifactRef, ArtifactRef]; driverFence: number }
   | { type: "FinalAuditCompleted"; auditRefs: [ArtifactRef, ArtifactRef]; accepted: boolean; driverFence: number }
   | { type: "CompletionEvaluated"; reportRef: ArtifactRef; accepted: boolean; driverFence: number }
-  | { type: "PauseRequested"; reason: string }
-  | { type: "ResumeRequested" }
-  | { type: "CancelRequested"; reason?: string }
-  | { type: "CancellationSettled"; cleanupRef: ArtifactRef; mutationOutcome: "SETTLED" | "ROLLED_BACK" | "INDETERMINATE" }
-  | { type: "FatalError"; errorRef: ArtifactRef }
-  | { type: "BlockDeclared"; blockerRefs: ArtifactRef[] }
-  | { type: "ConvergenceLimitReached"; evidenceRef: ArtifactRef };
+  | { type: "PauseRequested"; reason: string; driverFence?: number }
+  | { type: "ResumeRequested"; driverFence?: number }
+  | { type: "CancelRequested"; reason?: string; driverFence?: number }
+  | { type: "CancellationSettled"; cleanupRef: ArtifactRef; mutationOutcome: "SETTLED" | "ROLLED_BACK" | "INDETERMINATE"; driverFence?: number }
+  | { type: "FatalError"; errorRef: ArtifactRef; driverFence?: number }
+  | { type: "BlockDeclared"; blockerRefs: ArtifactRef[]; driverFence?: number }
+  | { type: "ConvergenceLimitReached"; evidenceRef: ArtifactRef; driverFence?: number }
+  | { type: "MutationLeaseAttached"; lease: MutationLease; driverFence: number }
+  | { type: "MutationLeaseReleased"; leaseId: string; driverFence: number }
+  | { type: "DriverLeaseAcquired"; lease: DriverLease; fenceCounter: number }
+  | { type: "DriverLeaseReleased" };
 
 // ─── §3B — GoalRecord and supporting types ────────────────────────────────
 
@@ -105,6 +120,38 @@ type RevisionRef = {
 };
 
 type JobStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+
+// ─── Per-assignment execution state (Task 1: explicit assignment/run tracking) ─
+
+type AssignmentState =
+  | "CREATED"
+  | "ACQUIRED"
+  | "EXECUTING"
+  | "VERIFYING"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED";
+
+type RunStatus = "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+
+type RunRecord = {
+  runId: string;
+  sessionId: string;
+  status: RunStatus;
+  startedAt: ISO8601;
+  endedAt?: ISO8601;
+  resultRef?: ArtifactRef;
+};
+
+// Minimal DAG snapshot used for frontier-gated VERIFYING.
+// Assignments listed here form the required frontier for the current plan epoch.
+type ExecutionPlanSnapshot = {
+  planEpoch: number;
+  assignments: readonly {
+    readonly id: AssignmentId;
+    readonly dependsOn: readonly AssignmentId[];
+  }[];
+};
 
 type PreparationJob = {
   kind: "baseline" | "plan";
@@ -167,6 +214,15 @@ type GoalRecord = {
   recoveryRequired: boolean;
   planEpoch: number;           // starts at 0; material contradiction increments
   contractVersion: number | null;
+  lifecycleDepth: LifecycleDepth | null;
+  depthProposalRef: ArtifactRef | null;
+  depthApprovedAt?: ISO8601;
+  /** CAS artifact containing the complete prepared execution bundle. Optional for schema-v1 backward compatibility. */
+  preparedFlowRef?: ArtifactRef | null;
+  /** Durable evidence/reason for the currently requested repair cycle. */
+  repairReasonRef?: ArtifactRef;
+  /** True after a repair mutation settles and until a fresh verifier frontier starts. */
+  repairVerificationPending?: boolean;
   activeContractRef: ArtifactRef | null;
   pendingAmendmentRef?: ArtifactRef;
   amendmentReturnState?: Exclude<GoalState, "PAUSED" | "CANCELLING">;
@@ -185,6 +241,12 @@ type GoalRecord = {
   driverFenceCounter: number;
   activeMutationLease?: MutationLease;
   mutationFenceCounter: number;
+  // Per-assignment progress (Task 1). AssignmentCompleted transitions only
+  // the named assignment; the goal advances EXECUTING → VERIFYING only when
+  // every assignment in the current plan epoch's required frontier is terminal.
+  assignmentStates: Partial<Record<AssignmentId, AssignmentState>>;
+  activeRuns: Partial<Record<AssignmentId, RunRecord>>;
+  executionPlan: ExecutionPlanSnapshot | null;
   reviewCycles: number;
   repairCycles: number;
   finalAuditAttempts: number;
@@ -211,6 +273,7 @@ export type {
   AssignmentId,
   ISO8601,
   GoalState,
+  LifecycleDepth,
   GoalEvent,
   GoalRecord,
   WorkspaceIdentity,
@@ -220,5 +283,9 @@ export type {
   DriverLease,
   SnapshotPinLease,
   MutationLease,
+  AssignmentState,
+  RunStatus,
+  RunRecord,
+  ExecutionPlanSnapshot,
   PreparationProgress,
 };

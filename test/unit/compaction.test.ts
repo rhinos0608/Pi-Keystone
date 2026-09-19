@@ -240,7 +240,8 @@ describe("3 compactions + restart preserve state", () => {
       goal.planEpoch = i + 1;
       goal.reviewCycles = i;
       goal.snapshotRefs = [...goal.snapshotRefs, `snap-cycle-${i}` as any];
-      // Write back via create (atomic)
+      // Write back: create is no-clobber, so delete first.
+      store.delete("goal-1" as GoalId);
       store.create("goal-1" as GoalId, goal);
 
       // Restart from checkpoint
@@ -271,6 +272,7 @@ describe("3 compactions + restart preserve state", () => {
     goal = store.get("goal-1" as GoalId)!;
     goal.state = "EXECUTING";
     goal.planEpoch = 5;
+    store.delete("goal-1" as GoalId);
     store.create("goal-1" as GoalId, goal);
 
     // Restart uses live store (advanced state)

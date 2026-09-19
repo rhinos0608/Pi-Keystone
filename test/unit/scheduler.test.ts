@@ -140,13 +140,81 @@ describe("DAG scheduler", () => {
       }
     });
 
-    it("propagates executor errors", async () => {
+    // Task 1: sibling-result collection replaces fail-fast Promise.all.
+    // A throwing executor is captured per assignment; siblings are kept.
+    // Contract: any executor failure yields ok:false (with partial results).
+    it("collects executor errors without losing sibling results", async () => {
+      const scheduled = [wrap("a"), wrap("b"), wrap("c")];
+      const result = await executeSchedule(scheduled, async (assignment) => {
+        if (assignment.id === ("b" as unknown as typeof assignment.id)) throw new Error("boom");
+        return makeReport(assignment.id);
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok && "failures" in result) {
+        expect(result.results).toHaveLength(2);
+        expect(result.failures).toHaveLength(1);
+        expect(result.failures[0].assignmentId).toBe("b");
+        expect((result.failures[0].error as Error).message).toBe("boom");
+      } else {
+        throw new Error("expected executor-failure result");
+      }
+    });
+
+    it("single failure yields ok:false with empty results plus one failure entry", async () => {
       const scheduled = [wrap("a")];
-      await expect(
-        executeSchedule(scheduled, async () => {
-          throw new Error("boom");
-        }),
-      ).rejects.toThrow("boom");
+      const result = await executeSchedule(scheduled, async () => {
+        throw new Error("boom");
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok && "failures" in result) {
+        expect(result.results).toHaveLength(0);
+        expect(result.failures).toHaveLength(1);
+      } else {
+        throw new Error("expected executor-failure result");
+      }
+    });
+
+    it("blocks dependent descendants after an earlier dependency failure", async () => {
+      const ran: string[] = [];
+      // a fails in layer 0; b and c are dependency descendants and must not run.
+      const scheduled = [wrap("a"), wrap("b", ["a"]), wrap("c", ["b"])];
+      const result = await executeSchedule(scheduled, async (assignment) => {
+        ran.push(assignment.id as string);
+        if (assignment.id === ("a" as unknown as typeof assignment.id)) throw new Error("boom");
+        return makeReport(assignment.id);
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok && "failures" in result) {
+        expect(ran).toEqual(["a"]);
+        expect(result.results).toHaveLength(0);
+        expect(result.failures.map((f) => f.assignmentId)).toEqual(["a", "b", "c"]);
+        expect((result.failures[1]!.error as { code?: string }).code).toBe("DEPENDENCY_FAILED");
+        expect((result.failures[2]!.error as { code?: string }).code).toBe("DEPENDENCY_FAILED");
+      } else {
+        throw new Error("expected executor-failure result");
+      }
+    });
+
+    it("continues an independent branch when another branch fails", async () => {
+      const ran: string[] = [];
+      // a -> b fails at a, while x -> y remains independent and should complete.
+      const scheduled = [wrap("a"), wrap("b", ["a"]), wrap("x"), wrap("y", ["x"])];
+      const result = await executeSchedule(scheduled, async (assignment) => {
+        ran.push(assignment.id as string);
+        if (assignment.id === ("a" as unknown as typeof assignment.id)) throw new Error("boom");
+        return makeReport(assignment.id);
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok && "failures" in result) {
+        expect(ran).toContain("a");
+        expect(ran).toContain("x");
+        expect(ran).toContain("y");
+        expect(ran).not.toContain("b");
+        expect(result.results.map((r) => r.assignmentId).sort()).toEqual(["x", "y"]);
+      } else {
+        throw new Error("expected executor-failure result");
+      }
     });
 
     it("returns errors from invalid DAG", async () => {

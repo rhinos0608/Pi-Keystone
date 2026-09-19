@@ -90,14 +90,15 @@ describe("cancelGoal", () => {
     expect(result.outcome).toBe("SETTLED");
   });
 
-  it("rolls back CANCELLING with active MUTATING mutation", () => {
+  it("quarantines CANCELLING with active MUTATING mutation (no rollback proof → INDETERMINATE)", () => {
     const goal = makeGoal({
       state: "CANCELLING",
       activeMutationLease: makeMutationLease({ phase: "MUTATING" }),
     });
     const result = cancelGoal(goal, iso());
-    expect(result.settled).toBe(true);
-    expect(result.outcome).toBe("ROLLED_BACK");
+    expect(result.settled).toBe(false);
+    expect(result.outcome).toBe("INDETERMINATE");
+    expect(result.quarantined).toBe(true);
   });
 
   it("quarantines indeterminate mutation when lease outlasts timeout", () => {

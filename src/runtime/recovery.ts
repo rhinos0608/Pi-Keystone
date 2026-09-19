@@ -8,7 +8,10 @@ import type {
   DriverLease,
   ArtifactRef,
   ISO8601,
+  GoalId,
 } from "../domain/types.js";
+import type { ReceiptLog } from "./lifecycle.js";
+import { GoalStore } from "../store/goal-store.js";
 
 // ─── Cancellation Settlement ────────────────────────────────────────────────
 
@@ -70,12 +73,16 @@ export function settleCancellation(
   }
 
   if (mutation.phase === "MUTATING") {
+    // Never claim ROLLED_BACK without proof: this function runs in-process
+    // with no rollback artifact (no evidence the partial writes were undone),
+    // so a MUTATING lease is INDETERMINATE (quarantine path) until external
+    // evidence proves settlement or rollback.
     return {
-      outcome: "ROLLED_BACK",
+      outcome: "INDETERMINATE",
       event: {
         type: "CancellationSettled",
         cleanupRef: "" as ArtifactRef,
-        mutationOutcome: "ROLLED_BACK",
+        mutationOutcome: "INDETERMINATE",
       },
     };
   }
@@ -152,7 +159,7 @@ export function evictExpiredQuarantine(
 
 export type RecoveryAction =
   | { kind: "orphaned_driver_lease"; goalId: string; leaseId: string }
-  | { kind: "stale_mutation_lease"; goalId: string; leaseId: string }
+  | { kind: "stale_mutation_lease"; goalId: string; leaseId: string; phase: MutationLease["phase"] }
   | { kind: "stale_recovery_required"; goalId: string };
 
 /**
@@ -174,6 +181,11 @@ export function detectRecoveryIssues(
   const issues: RecoveryAction[] = [];
 
   for (const goal of goals) {
+    // Terminal goals are skipped entirely: a terminal flag is wedged by
+    // design (no transition out exists), and continuation canContinue is
+    // already false for them — reporting stale_recovery_required there only
+    // invites a no-op clear. Terminal bookkeeping is operator-owned, not
+    // startup-recovery-owned.
     if (TERMINAL_STATES.has(goal.state)) continue;
 
     // Orphaned driver lease
@@ -196,6 +208,7 @@ export function detectRecoveryIssues(
           kind: "stale_mutation_lease",
           goalId: goal.goalId,
           leaseId: goal.activeMutationLease.leaseId,
+          phase: goal.activeMutationLease.phase,
         });
       }
     }
@@ -213,27 +226,82 @@ export function detectRecoveryIssues(
 }
 
 /**
- * Repair a goal with an orphaned driver lease by clearing the stale lease
- * and incrementing the record version.
- * Returns the patched record (mutated in place for simplicity).
+ * Repair a goal with an orphaned driver lease through a persistent, audited
+ * store repair: clears the stale lease, flags recoveryRequired, CAS-guards
+ * the write, bumps recordVersion, and appends a receipt log entry.
+ * Never mutates caller-owned objects; operates on the stored record.
  */
 export function repairOrphanedDriverLease(
-  record: GoalRecord,
+  store: GoalStore,
+  goalId: GoalId,
+  receiptLog?: ReceiptLog,
 ): GoalRecord {
-  record.activeDriverLease = undefined;
-  record.recoveryRequired = true;
-  record.recordVersion += 1;
-  return record;
+  const before = store.get(goalId);
+  if (!before) throw new Error(`Goal ${goalId} not found`);
+  const updated = store.repair(goalId, "driver-lease", {
+    expectedVersion: before.recordVersion,
+  });
+  receiptLog?.push({
+    goalId,
+    eventType: "Recovery:driver-lease",
+    fromState: before.state,
+    toState: updated.state,
+    recordVersion: updated.recordVersion,
+    timestamp: new Date().toISOString(),
+    transitionId: updated.lastTransitionId,
+  });
+  return updated;
 }
 
 /**
- * Repair a goal with a stale mutation lease by clearing it.
+ * Repair a goal with a stale mutation lease through a persistent, audited
+ * store repair (same guarantees as repairOrphanedDriverLease).
  */
 export function repairStaleMutationLease(
-  record: GoalRecord,
+  store: GoalStore,
+  goalId: GoalId,
+  receiptLog?: ReceiptLog,
 ): GoalRecord {
-  record.activeMutationLease = undefined;
-  record.recoveryRequired = true;
-  record.recordVersion += 1;
-  return record;
+  const before = store.get(goalId);
+  if (!before) throw new Error(`Goal ${goalId} not found`);
+  const updated = store.repair(goalId, "mutation-lease", {
+    expectedVersion: before.recordVersion,
+  });
+  receiptLog?.push({
+    goalId,
+    eventType: "Recovery:mutation-lease",
+    fromState: before.state,
+    toState: updated.state,
+    recordVersion: updated.recordVersion,
+    timestamp: new Date().toISOString(),
+    transitionId: updated.lastTransitionId,
+  });
+  return updated;
+}
+
+/**
+ * Clear recoveryRequired after successful lease repair (or explicit clear).
+ * Uses the CAS-guarded store repair path; throws IgnoredEventError when the
+ * flag is already false. continuation.ts canContinue works again afterwards.
+ */
+export function clearRecoveryRequired(
+  store: GoalStore,
+  goalId: GoalId,
+  receiptLog?: ReceiptLog,
+): GoalRecord {
+  const before = store.get(goalId);
+  if (!before) throw new Error(`Goal ${goalId} not found`);
+  const updated = store.repair(goalId, "clear-recovery", {
+    expectedVersion: before.recordVersion,
+  });
+  receiptLog?.push({
+    goalId,
+    eventType: "Recovery:clear-recovery",
+    fromState: before.state,
+    toState: updated.state,
+    recordVersion: updated.recordVersion,
+    timestamp: new Date().toISOString(),
+    transitionId: updated.lastTransitionId,
+  });
+  return updated;
 }

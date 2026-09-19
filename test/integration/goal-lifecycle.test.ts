@@ -5,9 +5,10 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { GoalRecord, GoalId, RevisionRef, WorkspaceIdentity } from "../../src/domain/types.js";
+import type { GoalRecord, GoalId, RevisionRef, WorkspaceIdentity, MutationLease } from "../../src/domain/types.js";
 import { createGoalRecord } from "../../src/domain/goal-record.js";
-import { GoalStore } from "../../src/store/goal-store.js";
+import { GoalStore, InvalidTransitionError, IgnoredEventError } from "../../src/store/goal-store.js";
+import { TerminalStateError } from "../../src/runtime/lifecycle.js";
 import {
   dispatchEvent,
   startGoal,
@@ -20,6 +21,7 @@ import {
   buildContinuationContext,
 } from "../../src/continuation.js";
 import { createKeystone } from "../../src/index.js";
+import { acquireLease, releaseLease, checkLease } from "../../src/execution/mutation-lease.js";
 
 // ─── Test fixtures ──────────────────────────────────────────────────────────
 
@@ -128,7 +130,7 @@ describe("GoalStore CRUD", () => {
     const id = makeGoalId();
     store.create(id, createGoalRecord(id, "task", WORKSPACE, REVISION));
     expect(store.delete(id)).toBe(true);
-    expect(store.get(id)).toBeUndefined();
+    expect(store.get(id)).toBeNull();
   });
 
   it("returns false when deleting nonexistent goal", () => {
@@ -136,13 +138,18 @@ describe("GoalStore CRUD", () => {
     expect(store.delete(id)).toBe(false);
   });
 
-  it("update rejects invalid transition (reducer returns unchanged state)", () => {
+  it("update rejects wrong-source event with typed IgnoredEventError (no write, no bump)", () => {
     const id = makeGoalId();
     store.create(id, createGoalRecord(id, "task", WORKSPACE, REVISION));
 
-    // CREATED → EXECUTING is invalid; reducer returns unchanged state, store skips validation
-    const result = store.update(id, { type: "ExecutionStarted", contractVersion: 1, executionPlanRef: ARTIFACT, driverFence: 0 });
-    expect(result.state).toBe("CREATED");
+    // CREATED → EXECUTING is invalid; the source-guarded reducer returns base
+    // unchanged, so the store throws IgnoredEventError instead of persisting
+    // a fake transition.
+    expect(() =>
+      store.update(id, { type: "ExecutionStarted", contractVersion: 1, executionPlanRef: ARTIFACT, driverFence: 0 }),
+    ).toThrowError(IgnoredEventError);
+    expect(store.get(id)!.state).toBe("CREATED");
+    expect(store.get(id)!.recordVersion).toBe(1);
   });
 });
 
@@ -176,17 +183,21 @@ describe("Lifecycle event dispatch", () => {
     expect(store.get(goalId)!.recordVersion).toBe(1 + log.length);
   });
 
-  it("rejects events from terminal states (reducer returns unchanged state)", () => {
+  it("rejects events from terminal states with typed TerminalStateError", () => {
     const record = createGoalRecord(goalId, "task", WORKSPACE, REVISION);
     startGoal(store, goalId, record, log);
     completePreparation(store, goalId, log);
     happyPathToEnd(store, goalId, log);
 
     expect(store.get(goalId)!.state).toBe("DONE");
+    const versionBefore = store.get(goalId)!.recordVersion;
 
-    // DONE → PREPARING is invalid; reducer returns unchanged state
-    const { record: updated } = dispatchEvent(store, goalId, { type: "GoalStarted" }, log);
-    expect(updated.state).toBe("DONE");
+    // DONE admits no transitions: typed rejection, no write, no version bump.
+    expect(() => dispatchEvent(store, goalId, { type: "GoalStarted" }, log)).toThrowError(
+      TerminalStateError,
+    );
+    expect(store.get(goalId)!.state).toBe("DONE");
+    expect(store.get(goalId)!.recordVersion).toBe(versionBefore);
   });
 
   it("pause and resume cycle", () => {
@@ -338,7 +349,7 @@ describe("Keystone extension (index.ts)", () => {
     expect(list.length).toBe(1);
 
     expect(ks.goal.delete(id)).toBe(true);
-    expect(ks.goal.get(id)).toBeUndefined();
+    expect(ks.goal.get(id)).toBeNull();
   });
 
   it("hooks.session_before_compact returns continuation context", () => {
@@ -356,6 +367,10 @@ describe("Keystone extension (index.ts)", () => {
     const id = makeGoalId();
     ks.goal.create({ goalId: id, userTask: "task", workspace: WORKSPACE, startRevision: REVISION });
 
+    // ReconciliationCompleted only applies in RECONCILING: drive preparation
+    // there first (a no-op dispatch would now throw IgnoredEventError).
+    ks.dispatchEvent(id, { type: "PreparationProgress", job: "baseline", planEpoch: 0, attemptId: "att-1", basedOnRevision: REVISION, status: "SUCCEEDED", driverFence: 0, artifactRef: ARTIFACT });
+    ks.dispatchEvent(id, { type: "PreparationProgress", job: "plan", planEpoch: 0, attemptId: "att-2", basedOnRevision: REVISION, status: "SUCCEEDED", driverFence: 0, artifactRef: ARTIFACT });
     ks.dispatchEvent(id, {
       type: "ReconciliationCompleted",
       reportRef: ARTIFACT,
@@ -365,8 +380,8 @@ describe("Keystone extension (index.ts)", () => {
       decision: "ACCEPT_PLAN_BASIS",
     });
 
-    expect(ks.receiptLog.length).toBe(2);
-    expect(ks.receiptLog[1].eventType).toBe("ReconciliationCompleted");
+    expect(ks.receiptLog.length).toBe(4);
+    expect(ks.receiptLog[ks.receiptLog.length - 1].eventType).toBe("ReconciliationCompleted");
   });
 
   it("isTerminal reflects goal state", () => {
@@ -390,5 +405,124 @@ describe("Keystone extension (index.ts)", () => {
     ks.dispatchEvent(id, { type: "CompletionEvaluated", reportRef: ARTIFACT, accepted: true, driverFence: 0 });
 
     expect(ks.isTerminal(id)).toBe(true);
+  });
+
+  it("hooks.session_start repairs an expired lease and clears recoveryRequired so continuation resumes", async () => {
+    const ks = createKeystone({ dataDir: dir });
+    const id = makeGoalId();
+    ks.goal.create({ goalId: id, userTask: "task", workspace: WORKSPACE, startRevision: REVISION });
+    const { acquireDriverLeasePersisted } = await import("../../src/runtime/driver.js");
+    acquireDriverLeasePersisted(ks.store, id, "session-old", { ttlMs: 0 });
+    // Force expiry in the past through a persisted heartbeat-free write.
+    const rec = ks.store.get(id)!;
+    ks.store.update(id, {
+      type: "DriverLeaseAcquired",
+      lease: { ...rec.activeDriverLease!, expiresAt: "2000-01-01T00:00:00.000Z" as never },
+      fenceCounter: rec.driverFenceCounter,
+    });
+    ks.hooks.session_start();
+    const after = ks.store.get(id)!;
+    expect(after.activeDriverLease).toBeUndefined();
+    expect(after.recoveryRequired).toBe(false);
+    expect(ks.hooks.session_before_compact(id)!.canContinue).toBe(true);
+  });
+
+  it("hooks.session_start keeps PAUSED stable until explicit release", () => {
+    const ks = createKeystone({ dataDir: dir });
+    const id = makeGoalId();
+    ks.goal.create({ goalId: id, userTask: "task", workspace: WORKSPACE, startRevision: REVISION });
+    ks.dispatchEvent(id, { type: "PauseRequested", reason: "break" });
+    expect(ks.store.get(id)!.state).toBe("PAUSED");
+    const receiptsBefore = ks.receiptLog.length;
+    ks.hooks.session_start();
+    expect(ks.store.get(id)!.state).toBe("PAUSED");
+    expect(ks.receiptLog.length).toBe(receiptsBefore);
+  });
+
+  it("hooks.session_start repairs a stale PAUSED driver lease but does not resume", async () => {
+    const ks = createKeystone({ dataDir: dir });
+    const id = makeGoalId();
+    ks.goal.create({ goalId: id, userTask: "task", workspace: WORKSPACE, startRevision: REVISION });
+    const { acquireDriverLeasePersisted } = await import("../../src/runtime/driver.js");
+    const leased = acquireDriverLeasePersisted(ks.store, id, "session-old");
+    const fence = leased.activeDriverLease!.fencingToken;
+    ks.dispatchEvent(id, { type: "PauseRequested", reason: "break", driverFence: fence });
+    expect(ks.store.get(id)!.state).toBe("PAUSED");
+    const rec = ks.store.get(id)!;
+    ks.store.update(id, {
+      type: "DriverLeaseAcquired",
+      lease: { ...rec.activeDriverLease!, expiresAt: "2000-01-01T00:00:00.000Z" as never },
+      fenceCounter: rec.driverFenceCounter,
+    });
+    const receiptsBefore = ks.receiptLog.length;
+    ks.hooks.session_start();
+    expect(ks.store.get(id)!.state).toBe("PAUSED");
+    expect(ks.store.get(id)!.activeDriverLease).toBeUndefined();
+    // Driver-lease repair + clear-recovery only. Resume is user-authorized.
+    expect(ks.receiptLog.length).toBe(receiptsBefore + 2);
+    expect(ks.receiptLog.slice(-2).map((r) => r.eventType)).toEqual([
+      "Recovery:driver-lease",
+      "Recovery:clear-recovery",
+    ]);
+  });
+
+  it("runtime cancellation keeps the durable mirror when disk lease identity conflicts", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "keystone-cancel-conflict-"));
+    const ks = createKeystone({ dataDir: dir });
+    const id = makeGoalId();
+    const assignmentId = "cancel-conflict-assignment" as import("../../src/domain/types.js").AssignmentId;
+    const workspaceIdentity: WorkspaceIdentity = {
+      requestedRoot: workspace,
+      canonicalRoot: workspace,
+      projectKey: "cancel-conflict",
+      vcs: "none",
+    };
+    ks.goal.create({ goalId: id, userTask: "task", workspace: workspaceIdentity, startRevision: REVISION });
+    // Establish legitimate mutation authority context before injecting the
+    // conflicting disk/mirror identities. MutationLeaseAttached is intentionally
+    // rejected outside EXECUTING/REPAIRING.
+    completePreparation(ks.store, id, ks.receiptLog);
+    ks.dispatchEvent(id, {
+      type: "ReconciliationCompleted",
+      reportRef: ARTIFACT,
+      planEpoch: 0,
+      provisionalPlanRef: ARTIFACT,
+      basedOnRevision: REVISION,
+      decision: "ACCEPT_PLAN_BASIS",
+    });
+    ks.dispatchEvent(id, { type: "ContractFrozen", contractVersion: 1, contractRef: ARTIFACT });
+    const { acquireDriverLeasePersisted } = await import("../../src/runtime/driver.js");
+    const leased = acquireDriverLeasePersisted(ks.store, id, "cancel-session");
+    const driverFence = leased.activeDriverLease!.fencingToken;
+    ks.dispatchEvent(id, {
+      type: "ExecutionStarted",
+      contractVersion: 1,
+      executionPlanRef: ARTIFACT,
+      driverFence,
+      assignments: [{ id: assignmentId, dependsOn: [] }],
+    });
+    const disk = acquireLease({
+      goalId: String(id),
+      assignmentId,
+      sessionId: "cancel-session",
+      root: workspace,
+      writeSet: ["owned.txt"],
+      baseDirtySignature: "",
+    });
+    expect(disk.acquired).toBe(true);
+    if (!disk.acquired) throw new Error(disk.reason);
+    const mirror = { ...disk.lease, leaseId: "different-mirror-lease" };
+    ks.dispatchEvent(id, { type: "MutationLeaseAttached", lease: mirror, driverFence });
+
+    const outcome = await ks.cancelGoal(id, "stop");
+    const after = ks.store.get(id)!;
+    expect(outcome).toEqual({ state: "CANCELLING", outcome: "INDETERMINATE" });
+    expect(after.state).toBe("CANCELLING");
+    expect(after.recoveryRequired).toBe(true);
+    expect(after.activeMutationLease?.leaseId).toBe("different-mirror-lease");
+    const stillOnDisk = checkLease(workspace);
+    expect(stillOnDisk && !("conflict" in stillOnDisk) ? stillOnDisk.leaseId : null).toBe(disk.lease.leaseId);
+
+    releaseLease(workspace, disk.lease.leaseId);
   });
 });
