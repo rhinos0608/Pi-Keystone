@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(npx tsc --noEmit 2 >& 1)",
+      "Shell(npx vitest run 2 >& 1)",
+      "Shell(grep:*)",
+      "Shell(git:*)",
+      "Shell(npx vitest run test/unit/recovery.test.ts test/unit/artifact-store.test.ts 2 >& 1)",
+      "Shell(npx vitest run test/unit/commands.test.ts test/unit/driver.test.ts test/unit/launcher.test.ts test/unit/baseline-runner.test.ts test/unit/goal-reducer.test.ts test/unit/scheduler.test.ts test/unit/evidence-graph.test.ts test/unit/plan-coverage.test.ts test/unit/snapshot.test.ts test/unit/subagent-rpc-client.test.ts test/unit/task1-persistence.test.ts test/unit/tool-policy.test.ts test/unit/child-guard.test.ts test/unit/redaction.test.ts test/unit/observability.test.ts test/unit/completion-gate.test.ts test/unit/contract-amendment.test.ts test/unit/worktree.test.ts test/unit/mutation-lease.test.ts test/unit/verification.test.ts test/integration/adaptive-lifecycle.test.ts 2 >& 1)",
+      "Shell(npx vitest run test/host test/unit/provisional-plan.test.ts test/unit/completion-report.test.ts 2 >& 1)",
+      "Shell(npm:*)",
+      "Shell(npx vitest run test/unit/recovery.test.ts 2 >& 1)",
+      "Shell(npx vitest run test/unit test/integration test/e2e 2 >& 1)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

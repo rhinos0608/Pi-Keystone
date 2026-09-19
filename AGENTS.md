@@ -1,6 +1,6 @@
 # Pi-Keystone
 
-> Orchestration toolkit for Pi goal lifecycle. NOT a self-running system — provides state machines, leases, scheduling primitives, and dispatch value objects. The caller owns session spawning, worker execution, and mutation authority tracking.
+> Durable Pi goal-lifecycle extension and orchestration runtime. Keystone owns preparation, adaptive-depth confirmation, pi-subagents child spawning, mutation authority, recovery, evidence, review/audit, and completion gating. Pure dispatch builders remain public seams, but the production extension drives the lifecycle itself.
 
 ## Goal state machine
 
@@ -88,7 +88,7 @@ expiresAt: ISO8601
 - Active lease, same session → heartbeat (extend expiry)
 - Active lease, different session → rejected, no mutation
 
-**Fencing**: Every event carrying `driverFence` must match the GoalRecord's `driverFenceCounter`. `dispatchEvent()` calls `validateDriverFence()` which does a simple `===` check against the counter — it does NOT call `validateFencedEvent()` or check active/expiry state on the lease. `validateFencedEvent()` (in `driver.ts`) is a separate function that validates against the active lease's `fencingToken` and checks lease expiry, but is not used by the dispatch pipeline. Default TTL: 60s.
+**Fencing**: Every event carrying `driverFence` is checked in `dispatchEvent()` (`src/runtime/lifecycle.ts`). Once fencing is active for a goal (an `activeDriverLease` exists or `driverFenceCounter > 0`), the check goes through `validateFencedEvent()` — the event token must equal the active lease's `fencingToken` and the lease must be unexpired; otherwise a `FenceError` is thrown and nothing persists. Goals that never acquired a lease keep a legacy counter check (`validateDriverFence()`: token `=== driverFenceCounter`) so pre-lease bootstrap events (fence 0) still dispatch. Leases persist via `DriverLeaseAcquired` / `DriverLeaseReleased` events (CAS-guarded `acquireDriverLeasePersisted` / `releaseDriverLeasePersisted` in `src/runtime/driver.ts`) — never bare object mutation. Default TTL: 60s.
 
 **GoalRecord fields**: `activeDriverLease`, `driverFenceCounter`.
 
@@ -97,7 +97,7 @@ expiresAt: ISO8601
 One per goal (on GoalRecord). Governs per-assignment write authority.
 
 ```
-fencingToken: number              // wall-clock timestamp (Date.now()), not a strictly monotonic counter
+fencingToken: number              // monotonically increasing persisted counter per canonical worktree (directory-lock guarded)
 phase: "ACQUIRED" | "AUTHORITY_READY" | "MUTATING" | "SETTLING"
 assignmentId: AssignmentId
 sessionId: string
@@ -122,7 +122,7 @@ inFlightToolCallId?: string
 
 ### Per-worktree mutation lease (`src/execution/mutation-lease.ts`)
 
-Exclusive write lock per worktree root. In-memory map keyed by the raw `root` string (not canonicalized) + disk persistence (`${root}/.keystone-lease.json`). TTL default: 30s. Stale leases auto-expired on next check. Provides `acquireLease`, `releaseLease`, `checkLease`.
+Exclusive write lock per canonical worktree root. Authority is persisted at `${canonicalRoot}/.keystone-lease.json`; acquisition uses a cross-process directory lock plus atomic exclusive lease creation, and fencing tokens come from a persisted monotonic counter. The in-process map is only a cache. TTL defaults to 30s, heartbeats extend live leases, and corrupt lease/counter state fails closed. Provides `acquireLease`, `releaseLease`, `checkLease`, heartbeat, and phase progression.
 
 ### Snapshot pin lease (`SnapshotPinLease` — `src/domain/types.ts`)
 
@@ -144,7 +144,7 @@ Managed by `src/store/snapshot-roots.ts`: `pinSnapshots()`, `unpinGoal()`, `getA
 `src/execution/scheduler.ts` — Kahn's algorithm topological sort.
 
 - `resolveOrder(scheduled)` → `layers: AssignmentId[][]` — groups of assignments that can run in parallel
-- `executeSchedule(scheduled, executor)` — runs layer-by-layer; each layer's assignments execute concurrently via `Promise.all`
+- `executeSchedule(scheduled, executor)` — runs layer-by-layer; each layer's assignments execute concurrently via `Promise.allSettled` (one throwing executor never loses sibling results, later layers still run). Result contract: `ok: true` only when every executor succeeded; any executor failure yields `ok: false` with partial results + per-assignment failures; unresolvable DAG yields `ok: false` with `errors`
 - Error cases: `DUPLICATE_ID`, `UNKNOWN_DEPENDENCY`, `CYCLE_DETECTED`
 - Scheduler is stateless, makes no reducer edits
 
@@ -168,7 +168,7 @@ Managed by `src/store/snapshot-roots.ts`: `pinSnapshots()`, `unpinGoal()`, `getA
 
 **`reserveCap()`**: Pre-flight check — call before dispatching an action. Blocks when `current + 1 > cap` (i.e. it allows reaching exactly the cap but rejects the next action that would exceed it). `checkProgress()` (used after the fact) detects when a cap has already been reached (`>=` comparisons) and returns a limit status. These are two different functions with different semantics — `reserveCap` is preventive, `checkProgress` is retrospective.
 
-**`ConvergenceLimitReached` event**: Defined in `src/domain/events.ts` and handled in the goal reducer (sets state to `NON_CONVERGENT`), but no production code path currently dispatches it. The convergence system uses `checkProgress()` returning status codes instead. Treat the event constructor as plumbing for future use, not active runtime behavior.
+**`ConvergenceLimitReached` event**: Active production behavior. Repair/final-audit convergence checks dispatch it when their bounded retry limits are exhausted, transitioning the goal to `NON_CONVERGENT` with an evidence artifact. `checkProgress()` and cap helpers remain the reusable policy primitives.
 
 ---
 
@@ -222,37 +222,29 @@ Custom reducers can be injected via `GoalStore.update()` or `dispatchEvent()`.
 - **dispatchEvent** coordinates read → validate → reduce → persist → log
 - **Context compiler, projections, convergence** are pure functions that read GoalRecord but never write it directly
 - **Launchers** (`dispatchMutation`, `dispatchReadOnly`) are pure builders — they construct delegation configs, never call the store
+- **Live execution paths** (`executeMutation`, `executeReadOnly`, `runExecutionFrontier`) are the store-writing exception: they persist runs and completion events via `dispatchEvent`/CAS. `runExecutionFrontier` is the orchestrator-owned runner (ExecutionStarted → scheduler → per-result completion dispatch)
 
 ---
 
 ## Execution boundary — CRITICAL
 
-**This repo is an orchestration toolkit, not a self-running lifecycle.**
+The production Pi extension is a self-driving lifecycle controller. `/goal create` prepares and persists a flow, the confirmation TUI approves adaptive depth, and release/run paths acquire the driver lease, execute the frontier through pi-subagents, verify, repair when required, review/audit, and evaluate the machine completion gate.
 
-Three dispatch functions build delegation / dispatch VALUE OBJECTS only:
+The `dispatchMutation`, `dispatchReadOnly`, and `dispatchRepair` APIs are still pure builders. They remain useful embedding/test seams, while the production controller composes them with the live execution paths.
 
 ### `dispatchRepair()` (`src/review/repair.ts`)
 
-Takes a `ReviewFinding`, `RepairAssignment`, previous findings, and `ImpactCone`. Returns a `RepairDispatch` value object containing `findingId`, `assignmentId`, `impactCone`, `previousFindings`. **Does not launch sessions, spawn workers, or execute repairs.**
+Builds the repair value object only. The controller owns repair child execution, durable run binding, mutation authority, post-repair verification, and convergence handling.
 
-### `dispatchMutation()` (`src/execution/mutation-launcher.ts`)
+### `dispatchMutation()` / `executeMutation()`
 
-Takes an assignment descriptor, `ContextView`, and `MutationLease`. Returns a `MutationLaunchResult` with two `MutationTurn` objects (acquisition + mutation) and the validated lease. **Does not launch sessions or execute mutations.**
+`dispatchMutation()` builds the acquisition/mutation delegation. The live controller first runs a fresh read-only acquisition child to discover the exact write-set, acquires the per-worktree lease, captures S1, obtains conflict approval when needed, advances authority, then `executeMutation()` spawns the guarded mutation child and maintains the lease heartbeat.
 
-### `dispatchReadOnly()` (`src/execution/read-only-launcher.ts`)
+### `dispatchReadOnly()` / `executeReadOnly()`
 
-Takes an assignment descriptor and `ContextView`. Returns a `ReadOnlyLaunchResult` with a `WorkerDelegation` config and null report. **Does not launch sessions or execute read-only work.**
+`dispatchReadOnly()` builds a read-only delegation. `executeReadOnly()` performs the real pi-subagents spawn and correlates `async-complete`; production uses it for frontier verifiers, mutation acquisition, review, and final-audit children.
 
-### What the caller must do (currently: nothing in this codebase)
-
-1. Call the dispatch function to get the value object
-2. Spawn a fresh Pi session (or subagent)
-3. Pass the delegation config to the session
-4. Track authority progression (phase transitions on the mutation lease)
-5. Capture the `WorkerReport` when the session completes
-6. Dispatch the corresponding completion event (`AssignmentCompleted`, `RepairCompleted`, etc.) via `dispatchEvent()`
-
-**`dispatchReadOnly` and `dispatchMutation`** are re-exported from `src/index.ts` for external consumers. **`dispatchRepair` is NOT exported** — it is internal to `src/review/repair.ts`.
+**Remaining host-proof gap:** the host ladder proves real extension loading and RPC/extension-order compatibility, but several lifecycle ladder stages still use fake-child seams. A real pi-subagents mutation/restart/audit/tiny-feature `DONE` ladder is still the principal integration acceptance item.
 
 ---
 
@@ -260,15 +252,15 @@ Takes an assignment descriptor and `ContextView`. Returns a `ReadOnlyLaunchResul
 
 ### Tool policy (`src/execution/tool-policy.ts`)
 
-Three modes: `read-only` (denies bash/write/edit/mcp), `restricted` (allowlist), `mutation` (requires permit token).
+Three modes: `read-only` (exact allowlist), `restricted` (explicit allowlist), and `mutation`. Mutation requires a structural permit bound to the active `leaseId + fencingToken`; textual mode denies bash, command-capable mutation modes allow only exact approved commands, and MCP tools require explicit lease allowlisting.
 
 ### Worker guard (`src/execution/worker-guard.ts`)
 
-Intercepts tool-call events. Validates session ID, lease expiry, and that the lease root is non-empty for file-writing tools. Does NOT validate that the target path falls under the root — path extraction and validation happen upstream (per the code's own comment). Enforces tool policy at call time.
+Parent-side worker guard handles orchestration bookkeeping, while `src/child/keystone-child-guard.ts` is the actual confinement boundary inside mutation children. The child guard re-reads the persisted live lease on every enforced tool call, blocks missing/expired/replaced authority, validates write targets against the exact acquired write-set, checks symlink containment, denies unknown tools fail-closed, and applies the bash/MCP policy carried by the launch-bound lease.
 
 ### Authority receipts (`src/execution/authority-receipt.ts`)
 
-Proves a read completed before a mutation. In-memory store. `recordReceipt()` → `validateReceipts()` ensures all requested resource IDs were covered.
+Proves read-before-write authority acquisition. Receipts retain a per-session in-memory index for fast coverage checks, but production also writes canonical receipt bytes into the controller CAS and stores the resulting `authorityReceiptRef` on the mutation lease. CAS-ref mismatches fail closed, so recovery/audit references survive process restart.
 
 ### Context compiler (`src/context/compiler.ts`)
 
@@ -280,7 +272,7 @@ Append-only finding records with pagination. `MAX_FINDINGS`, `PAGE_SIZE`, `ROOT_
 
 ### Baseline (`src/baseline/`)
 
-Git worktree state capture, check execution, failure fingerprinting, baseline comparison.
+Content-sensitive S0/S1 worktree snapshots, repository package-script execution through the detected package manager, failure fingerprinting, pre-existing-damage ownership, and baseline comparison. Dirty/red workspaces are valid baselines; new post-execution fingerprints count as goal-owned regressions even when a check remains FAIL → FAIL.
 
 ### Contract (`src/contract/`)
 
@@ -308,10 +300,13 @@ src/
   store/           GoalStore, snapshot roots, active index, artifact store, atomic JSON
   runtime/         Driver, lifecycle, recovery, commands, feature-detect
   execution/       Scheduler, launchers, leases, worker guard, tool policy, authority receipts
+  rpc/             SubagentRpcClient, run registry, pi-subagents bridge
+  child/           Keystone child guard extension (loaded in mutation children)
+  evidence/        Evidence graph, manifests
   context/         Compiler, projections, compaction, types
   planning/        Provisional plan, reconciliation, orchestrator
   contract/        Draft, critique, amendment, canonical, orchestrator
-  baseline/        Runner, worktree, compare, orchestrator, failure fingerprint
+  baseline/        Runner, snapshot, worktree, compare, orchestrator, failure fingerprint
   findings/        Ledger, fingerprint, adjudication
   review/          Discovery, convergence, repair, types
   verification/    Verification run, criterion evaluator
@@ -325,6 +320,9 @@ src/
 ## Verification
 
 ```
+git diff --check     → clean
 tsc --noEmit         → 0 errors
-vitest run           → 49 test files, 670 tests, all passing
+vitest run           → 65 passed files / 1054 passing tests, 1 opt-in live E2E skipped
+vitest run test/host → 3 passed files / 16 passing tests, 1 opt-in live E2E skipped
+npm run test:live-e2e → standard-depth real-child path reaches DONE; full-depth additionally requires an available configured oracle chain
 ```
