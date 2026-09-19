@@ -2,26 +2,31 @@
 // Rejects invented requirements and unverifiable criteria.
 
 import type { PiCapabilities } from "../runtime/feature-detect.js";
+import type {
+  ContractStatement as CanonicalStatement,
+  StatementProvenance as CanonicalProvenance,
+  StatementStrength as CanonicalStrength,
+} from "./goal-contract.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
-export type Provenance = "explicit-user" | "repo-inferred" | "derived";
-export type StatementStrength = "hard" | "soft";
+export type Provenance = CanonicalProvenance;
+export type StatementStrength = CanonicalStrength;
 export type RejectionReason = "invented-requirement" | "unverifiable-criteria";
 
-export type ContractStatement = {
-  id: string;
-  text: string;
-  provenance: Provenance;
-  strength: StatementStrength;
-};
+/**
+ * Draft-module statement. Re-derived from the canonical readonly shape in
+ * goal-contract.ts (same id/text/provenance/strength fields); this alias
+ * keeps the draft module API stable while unifying the family.
+ */
+export type ContractStatement = CanonicalStatement;
 
-export type CompletionCriterion = {
-  id: string;
-  text: string;
-  verifiable: boolean;
-  provenance: Provenance;
-  strength: StatementStrength;
+/**
+ * Draft completion criterion: canonical statement shape plus the draft-time
+ * verifiability flag. Rejected (unverifiable) candidates never reach this type.
+ */
+export type CompletionCriterion = CanonicalStatement & {
+  readonly verifiable: boolean;
 };
 
 export type RejectedItem = {

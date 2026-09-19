@@ -3,6 +3,12 @@ import {
   computeFingerprint,
   normalizeStderr,
   classifyFailures,
+  parseTscOutput,
+  parseTestOutput,
+  parseEslintOutput,
+  parseFailureFingerprints,
+  quarantineUnparsedOutput,
+  hashParsedFailure,
   type FailureInput,
 } from "../../src/baseline/failure-fingerprint.js";
 
@@ -202,4 +208,55 @@ test("fingerprints array length matches inputs length", () => {
 
   const result = classifyFailures(inputs);
   expect(result.fingerprints.length).toBe(3);
+});
+
+// ── Task 6: output parsers ───────────────────────────────────────────────────
+
+test("parseTscOutput extracts file, line, diagnostic per error", () => {
+  const output = [
+    "src/a.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.",
+    "src/b.ts(3,1): error TS2304: Cannot find name 'foo'.",
+  ].join("\n");
+  const parsed = parseTscOutput(output);
+  expect(parsed).toHaveLength(2);
+  expect(parsed[0].file).toBe("src/a.ts");
+  expect(parsed[0].line).toBe(12);
+  expect(parsed[0].diagnostic).toContain("TS2322");
+  expect(parsed[0].id).toMatch(/^[a-f0-9]{64}$/);
+  expect(parsed[0].id).toBe(parsed[0].hash);
+});
+
+test("parseTestOutput yields one fingerprint per failing test", () => {
+  const output = [
+    "FAIL src/a.test.ts > suite > test one",
+    "FAIL src/b.test.ts > suite > test two",
+    "FAIL src/c.test.ts > suite > test three",
+  ].join("\n");
+  const parsed = parseTestOutput(output);
+  expect(parsed).toHaveLength(3);
+  const ids = new Set(parsed.map((p) => p.id));
+  expect(ids.size).toBe(3);
+  for (const p of parsed) expect(p.id).toMatch(/^[a-f0-9]{64}$/);
+});
+
+test("parseEslintOutput extracts file and line", () => {
+  const output = "src/a.ts:12:5:  error  Unexpected any  @typescript-eslint/no-explicit-any";
+  const parsed = parseEslintOutput(output);
+  expect(parsed).toHaveLength(1);
+  expect(parsed[0].file).toBe("src/a.ts");
+  expect(parsed[0].line).toBe(12);
+});
+
+test("parseFailureFingerprints emits nothing for unparsed output (quarantined, excluded from ownership)", () => {
+  const parsed = parseFailureFingerprints("test", "", "Error: something broke");
+  expect(parsed).toHaveLength(0);
+  const quarantined = quarantineUnparsedOutput("test", "", "Error: something broke");
+  expect(quarantined.length).toBeGreaterThan(0);
+  expect(quarantined[0].reason).toBe("unparsed-output");
+});
+
+test("hashParsedFailure is deterministic", () => {
+  const a = hashParsedFailure({ checkId: "test", file: "f.ts", line: 1, diagnostic: "boom" });
+  const b = hashParsedFailure({ checkId: "test", file: "f.ts", line: 1, diagnostic: "boom" });
+  expect(a.id).toBe(b.id);
 });

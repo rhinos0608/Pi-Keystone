@@ -171,3 +171,73 @@ function isImprovement(before: CheckOutcome, after: CheckOutcome): boolean {
 function isPassOutcome(o: CheckOutcome): boolean {
   return o === CheckOutcome.PASS;
 }
+
+// ─── Task 6: fingerprint ledger comparison ──────────────────────────────────
+//
+// Pre-existing damage ledger: fingerprints present in the before-baseline are
+// not owned by the goal. Only new fingerprints in `after` are owned.
+
+/** Minimal fingerprint identity for ledger comparison (id === sha256 hash). */
+export type FingerprintIdentity = {
+  readonly id: string;
+  readonly hash: string;
+};
+
+export type FingerprintComparison = {
+  /** Fingerprints in both before and after — pre-existing, not owned. */
+  readonly preExisting: readonly string[];
+  /** Fingerprints only in after — new/regressed, owned by the goal. */
+  readonly newFailures: readonly string[];
+  /** Fingerprints only in before — resolved since the baseline. */
+  readonly resolved: readonly string[];
+  /** Alias of newFailures: the set the goal owns. */
+  readonly ownedByGoal: readonly string[];
+};
+
+/** Diff two fingerprint sets by content hash. */
+export function compareFingerprints(
+  before: readonly FingerprintIdentity[],
+  after: readonly FingerprintIdentity[],
+): FingerprintComparison {
+  const beforeIds = new Set(before.map((f) => f.hash));
+  const afterIds = new Set(after.map((f) => f.hash));
+  const preExisting = [...afterIds].filter((h) => beforeIds.has(h));
+  const newFailures = [...afterIds].filter((h) => !beforeIds.has(h));
+  const resolved = [...beforeIds].filter((h) => !afterIds.has(h));
+  return { preExisting, newFailures, resolved, ownedByGoal: newFailures };
+}
+
+export type EcosystemCheckTransition = {
+  readonly checkId: string;
+  readonly before: string;
+  readonly after: string;
+};
+
+export type EcosystemComparison = {
+  /** Per-check status transitions (before → after). */
+  readonly transitions: readonly EcosystemCheckTransition[];
+  readonly fingerprints: FingerprintComparison;
+};
+
+/**
+ * Compare two ecosystem baselines: per-check status transitions plus the
+ * fingerprint ledger diff. Pre-existing fingerprints are not owned by goal.
+ */
+export function compareEcosystemBaselines(
+  before: {
+    checks: Readonly<Record<string, { status: string }>>;
+    failureFingerprints: readonly FingerprintIdentity[];
+  },
+  after: {
+    checks: Readonly<Record<string, { status: string }>>;
+    failureFingerprints: readonly FingerprintIdentity[];
+  },
+): EcosystemComparison {
+  const ids = new Set([...Object.keys(before.checks), ...Object.keys(after.checks)]);
+  const transitions: EcosystemCheckTransition[] = [...ids].map((checkId) => ({
+    checkId,
+    before: before.checks[checkId]?.status ?? "UNAVAILABLE",
+    after: after.checks[checkId]?.status ?? "UNAVAILABLE",
+  }));
+  return { transitions, fingerprints: compareFingerprints(before.failureFingerprints, after.failureFingerprints) };
+}

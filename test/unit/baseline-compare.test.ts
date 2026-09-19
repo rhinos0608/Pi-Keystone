@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { compareBaseline, type BaselineDelta } from "../../src/baseline/compare.js";
+import { compareFingerprints, compareEcosystemBaselines } from "../../src/baseline/compare.js";
 import {
   CheckOutcome,
   type BaselineRecord,
@@ -194,5 +195,44 @@ describe("compareBaseline", () => {
     })];
     const delta = compareBaseline(makeBaseline(before), makeBaseline(after));
     expect(delta.regressions[0].fingerprint).toBe(fp);
+  });
+});
+
+// ─── Task 6: pre-existing damage ledger ─────────────────────────────────────
+
+describe("compareFingerprints", () => {
+  it("marks before-baseline fingerprints as pre-existing, not owned", () => {
+    const before = [{ id: "a", hash: "a" }, { id: "b", hash: "b" }];
+    const after = [{ id: "b", hash: "b" }, { id: "c", hash: "c" }];
+    const cmp = compareFingerprints(before, after);
+    expect(cmp.preExisting).toEqual(["b"]);
+    expect(cmp.newFailures).toEqual(["c"]);
+    expect(cmp.resolved).toEqual(["a"]);
+    expect(cmp.ownedByGoal).toEqual(["c"]);
+    expect(cmp.ownedByGoal).not.toContain("b");
+  });
+
+  it("is empty when both sets match", () => {
+    const set = [{ id: "a", hash: "a" }];
+    const cmp = compareFingerprints(set, set);
+    expect(cmp.newFailures).toHaveLength(0);
+    expect(cmp.ownedByGoal).toHaveLength(0);
+  });
+});
+
+describe("compareEcosystemBaselines", () => {
+  it("produces per-check transitions and owned-only new failures", () => {
+    const before = {
+      checks: { typecheck: { status: "PASS" }, test: { status: "FAIL" } },
+      failureFingerprints: [{ id: "old", hash: "old" }],
+    };
+    const after = {
+      checks: { typecheck: { status: "FAIL" }, test: { status: "FAIL" } },
+      failureFingerprints: [{ id: "old", hash: "old" }, { id: "new", hash: "new" }],
+    };
+    const cmp = compareEcosystemBaselines(before, after);
+    expect(cmp.transitions).toContainEqual({ checkId: "typecheck", before: "PASS", after: "FAIL" });
+    expect(cmp.fingerprints.preExisting).toEqual(["old"]);
+    expect(cmp.fingerprints.ownedByGoal).toEqual(["new"]);
   });
 });

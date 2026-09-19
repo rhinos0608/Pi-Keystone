@@ -5,10 +5,10 @@ import type {
   ContextRole,
   EntityRef,
   Finding,
-  GoalStore,
+  ContextGoalStore,
   SnapshotRefs,
   ContractRef,
-  Assignment,
+  ContextAssignment,
   VerificationResult,
 } from "../../src/context/types.js";
 import { DEFAULT_TOKEN_BUDGET } from "../../src/context/types.js";
@@ -37,7 +37,7 @@ const verificationResults: VerificationResult[] = [
   { contractId: "c4", passed: true, details: "all checks pass", tokenCost: 150 },
 ];
 
-const assignment: Assignment = {
+const assignment: ContextAssignment = {
   id: "a1",
   goalId: "c1",
   workerRole: "worker",
@@ -52,7 +52,7 @@ const baseline: SnapshotRefs["baseline"] = {
   checksum: "abc123",
 };
 
-function makeStore(overrides?: Partial<GoalStore>): GoalStore {
+function makeStore(overrides?: Partial<ContextGoalStore>): ContextGoalStore {
   return {
     contracts,
     baseline,

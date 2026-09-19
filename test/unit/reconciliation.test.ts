@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   reconcile,
+  nextEpochAfterReconcile,
   type BaselineResults,
   type ProvisionalPlan,
   type ContradictionRecord,
@@ -38,7 +39,7 @@ describe("reconcile", () => {
     expect(result.epochDelta).toBeUndefined();
   });
 
-  it("returns replan when plan targets dirty files", () => {
+  it("records dirty target files without treating them as a planning contradiction", () => {
     const plan: ProvisionalPlan = {
       actions: [
         { actionName: "fix-a", targetFiles: ["src/dirty.ts"] },
@@ -46,7 +47,7 @@ describe("reconcile", () => {
     };
     const dirtyFiles = new Set(["src/dirty.ts"]);
     const result = reconcile(cleanBaseline(), plan, dirtyFiles, 0);
-    expect(result.decision).toBe("replan");
+    expect(result.decision).toBe("accept");
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0].kind).toBe("target_files_dirty");
     expect(result.findings[0].detail).toContain("src/dirty.ts");
@@ -108,7 +109,7 @@ describe("reconcile", () => {
     expect(result.epochDelta).toBe(1);
   });
 
-  it("does not block when history count is below threshold", () => {
+  it("does not escalate repeated dirty-target observations into a contradiction block", () => {
     const baseline: BaselineResults = {
       tasks: [],
       verificationPassed: true,
@@ -123,7 +124,7 @@ describe("reconcile", () => {
       { kind: "target_files_dirty", count: 2 },
     ];
     const result = reconcile(baseline, plan, dirtyFiles, 1, history);
-    expect(result.decision).toBe("block"); // 2 prior + 1 this = 3 = threshold
+    expect(result.decision).toBe("accept");
   });
 
   it("detects diagnostics contradict ownership", () => {
@@ -316,5 +317,31 @@ describe("reconcile", () => {
     const result = reconcile(baseline, plan, EMPTY_DIRTY, 0);
     const f = result.findings.find((x) => x.kind === "capability_gap");
     expect(f).toBeUndefined();
+  });
+});
+
+describe("nextEpochAfterReconcile", () => {
+  it("bumps epoch by delta on replan, preserving prior epochs", () => {
+    const baseline: BaselineResults = {
+      tasks: [],
+      verificationPassed: false,
+      verificationDiagnostics: ["test suite failed"],
+    };
+    const plan: ProvisionalPlan = {
+      actions: [{ actionName: "reformat code", targetFiles: ["src/x.ts"] }],
+    };
+    const result = reconcile(baseline, plan, EMPTY_DIRTY, 2);
+    expect(result.decision).toBe("replan");
+    expect(nextEpochAfterReconcile(2, result)).toBe(3);
+  });
+
+  it("keeps epoch unchanged on accept (never resets to 0)", () => {
+    const baseline = cleanBaseline();
+    const plan: ProvisionalPlan = {
+      actions: [{ actionName: "fix", targetFiles: ["src/x.ts"] }],
+    };
+    const result = reconcile(baseline, plan, EMPTY_DIRTY, 4);
+    expect(result.decision).toBe("accept");
+    expect(nextEpochAfterReconcile(4, result)).toBe(4);
   });
 });

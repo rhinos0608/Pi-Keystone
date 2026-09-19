@@ -1,6 +1,6 @@
 /**
  * Frozen types for Phase 6 context compilation.
- * GoalContextView, Assignment, MutationLease, AuthorityReceipt.
+ * GoalContextView, ContextAssignment, ContextLease, AuthorityReceipt.
  */
 
 // ── Roles ──────────────────────────────────────────────────────────
@@ -45,9 +45,9 @@ export interface VerificationResult {
   readonly tokenCost: number;
 }
 
-// ── Assignment ─────────────────────────────────────────────────────
+// ── ContextAssignment ──────────────────────────────────────────────
 
-export interface Assignment {
+export interface ContextAssignment {
   readonly id: string;
   readonly goalId: string;
   readonly workerRole: string;
@@ -56,9 +56,9 @@ export interface Assignment {
   readonly tokenCost: number;
 }
 
-// ── MutationLease ──────────────────────────────────────────────────
+// ── ContextLease ───────────────────────────────────────────────────
 
-export interface MutationLease {
+export interface ContextLease {
   readonly assignmentId: string;
   readonly entityIds: readonly string[];
   readonly expiresAt: string;
@@ -69,7 +69,7 @@ export interface MutationLease {
 
 export interface AuthorityReceipt {
   readonly role: ContextRole;
-  readonly lease?: MutationLease;
+  readonly lease?: ContextLease;
   readonly allowedTools: readonly string[];
   readonly issuedAt: string;
 }
@@ -98,7 +98,7 @@ export interface GoalContextView {
   readonly findings: readonly Finding[];
   readonly baseline: BaselineInfo | null;
   readonly contractRefs: readonly ContractRef[];
-  readonly assignment: Assignment | null;
+  readonly assignment: ContextAssignment | null;
   readonly verificationResults: readonly VerificationResult[];
   readonly tools: readonly ToolInfo[];
 }
@@ -110,16 +110,16 @@ export interface SnapshotRefs {
   readonly contracts?: readonly ContractRef[];
 }
 
-export interface GoalStore {
+export interface ContextGoalStore {
   readonly contracts: readonly ContractRef[];
   readonly baseline?: BaselineInfo;
   readonly findings: readonly Finding[];
   readonly entities: readonly EntityRef[];
-  readonly assignment?: Assignment;
+  readonly assignment?: ContextAssignment;
   readonly verificationResults?: readonly VerificationResult[];
 }
 
-// ── Compiler config ────────────────────────────────────────────────
+// ── Compiler config ────────────────────────────────────────────────────
 
 export const DEFAULT_TOKEN_BUDGET = 4000;
 

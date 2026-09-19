@@ -92,15 +92,23 @@ export function reconcile(
   const findings: ReconciliationFinding[] = [];
 
   // Clone prior history so we can mutate
-  const history = new Map<string, number>();
+  const history = new Map<ReconciliationFinding["kind"], number>();
   for (const rec of priorHistory) {
     history.set(rec.kind, rec.count);
   }
 
+  const seenKindsThisPass = new Set<ReconciliationFinding["kind"]>();
   function addFinding(finding: ReconciliationFinding) {
     findings.push(finding);
-    const cur = history.get(finding.kind) ?? 0;
-    history.set(finding.kind, cur + 1);
+    // Escalation counts reconciliation ATTEMPTS, not the number of actions
+    // that happen to exhibit the same contradiction in one plan. Without
+    // this guard, three assignments touching one dirty file could hit the
+    // three-attempt block threshold during the very first reconciliation.
+    if (!seenKindsThisPass.has(finding.kind)) {
+      seenKindsThisPass.add(finding.kind);
+      const cur = history.get(finding.kind) ?? 0;
+      history.set(finding.kind, cur + 1);
+    }
   }
 
   // 1. Task failure already passes — plan assumes task failed, but it succeeded
@@ -168,6 +176,10 @@ export function reconcile(
 
   // 5. Diagnostics contradict ownership — ownershipMap assigns a file to a task
   //    but that task's diagnostics don't align with the file's baseline diagnostics
+  //    NOTE (caller-supplied-only): production runPlanning leaves ownershipMap
+  //    undefined — BaselineRecord carries per-check cwds with no per-file→check
+  //    mapping, so no cheap correct derivation exists. This detector fires only
+  //    when the caller supplies ownershipMap explicitly.
   if (plan.ownershipMap) {
     for (const [filePath, assignedTask] of Object.entries(plan.ownershipMap)) {
       const task = baseline.tasks.find((t) => t.taskName === assignedTask);
@@ -228,6 +240,8 @@ export function reconcile(
   }
 
   // 9. Ownership false — ownershipMap assigns file to a task that already succeeded
+  // NOTE (caller-supplied-only): see detector #5 — no ownershipMap in prod,
+  // so this fires only when the caller supplies one explicitly.
   if (plan.ownershipMap) {
     for (const [filePath, assignedTask] of Object.entries(plan.ownershipMap)) {
       const task = baseline.tasks.find((t) => t.taskName === assignedTask);
@@ -244,16 +258,32 @@ export function reconcile(
 
   // ─── Decision logic ──────────────────────────────────────────────────────
 
-  if (findings.length === 0) {
-    return { decision: "accept", reason: "No contradictions detected", findings };
+  // Dirty target files are an authority concern, not a planning
+  // contradiction. Keystone deliberately supports dirty/red baselines and
+  // resolves exact write collisions later at the mutation approval gate.
+  // Informational outside-cone failures are attribution context only.
+  const actionable = findings.filter(
+    (f) => f.kind !== "target_files_dirty" && f.severity !== "info",
+  );
+
+  if (actionable.length === 0) {
+    return {
+      decision: "accept",
+      reason: findings.length === 0
+        ? "No contradictions detected"
+        : "Only non-blocking baseline context detected",
+      findings,
+    };
   }
 
   const epochDelta =
-    findings.some((f) => f.severity === "critical") ? 1 : undefined;
+    actionable.some((f) => f.severity === "critical") ? 1 : undefined;
 
-  // Check escalation: any contradiction kind hit block threshold
-  for (const [, count] of history) {
-    if (count >= BLOCK_THRESHOLD) {
+  // Check escalation: any ACTIONABLE contradiction kind hit the cross-attempt
+  // threshold. Non-blocking dirty-file context can never escalate to BLOCK.
+  const actionableKinds = new Set(actionable.map((f) => f.kind));
+  for (const [kind, count] of history) {
+    if (actionableKinds.has(kind) && count >= BLOCK_THRESHOLD) {
       return {
         decision: "block",
         reason: `Contradiction repeated ${count} times — exceeding threshold of ${BLOCK_THRESHOLD}`,
@@ -265,8 +295,24 @@ export function reconcile(
 
   return {
     decision: "replan",
-    reason: `${findings.length} contradiction(s) detected`,
+    reason: `${actionable.length} actionable contradiction(s) detected`,
     epochDelta,
     findings,
   };
+}
+
+// ─── Epoch application ─────────────────────────────────────────────────────
+
+/**
+ * Apply a reconcile result to the current plan epoch.
+ * Monotonic: bumps +epochDelta when present, never resets to 0.
+ */
+export function nextEpochAfterReconcile(
+  currentEpoch: number,
+  result: ReconcileResult,
+): number {
+  if (result.epochDelta !== undefined) {
+    return currentEpoch + result.epochDelta;
+  }
+  return currentEpoch;
 }

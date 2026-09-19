@@ -18,9 +18,9 @@ import {
 const FROZEN_AT = "2025-06-01T00:00:00.000Z" as ISO8601;
 
 const ORIGINAL_STATEMENTS: ContractStatement[] = [
-  { id: "req-1", content: "Must handle 10k concurrent users", isHard: true },
-  { id: "req-2", content: "UI must be accessible", isHard: true },
-  { id: "req-3", content: "Use PostgreSQL for storage", isHard: false },
+  { id: "req-1", text: "Must handle 10k concurrent users", provenance: "explicit-user", strength: "hard" },
+  { id: "req-2", text: "UI must be accessible", provenance: "explicit-user", strength: "hard" },
+  { id: "req-3", text: "Use PostgreSQL for storage", provenance: "explicit-user", strength: "soft" },
 ];
 
 function makeContract(
@@ -54,7 +54,7 @@ describe("computeAmendmentDiff", () => {
   it("detects added statements", () => {
     const proposed = [
       ...ORIGINAL_STATEMENTS,
-      { id: "req-new", content: "Support rate limiting", isHard: false },
+      { id: "req-new", text: "Support rate limiting", provenance: "explicit-user", strength: "soft" },
     ];
     const diff = computeAmendmentDiff(ORIGINAL_STATEMENTS, proposed);
     expect(diff.added).toHaveLength(1);
@@ -73,7 +73,7 @@ describe("computeAmendmentDiff", () => {
 
   it("detects weakened hard requirements (hardness change only)", () => {
     const proposed = ORIGINAL_STATEMENTS.map((s) =>
-      s.id === "req-1" ? { ...s, isHard: false } : s,
+      s.id === "req-1" ? { ...s, strength: "soft" as const } : s,
     );
     const diff = computeAmendmentDiff(ORIGINAL_STATEMENTS, proposed);
     expect(diff.weakened).toHaveLength(1);
@@ -83,16 +83,16 @@ describe("computeAmendmentDiff", () => {
 
   it("detects strengthened statements", () => {
     const proposed = ORIGINAL_STATEMENTS.map((s) =>
-      s.id === "req-3" ? { ...s, isHard: true } : s,
+      s.id === "req-3" ? { ...s, strength: "hard" as const } : s,
     );
     const diff = computeAmendmentDiff(ORIGINAL_STATEMENTS, proposed);
     expect(diff.strengthened).toHaveLength(1);
     expect(diff.strengthened[0].statement.id).toBe("req-3");
   });
 
-  it("detects content changes as strengthened on equal hardness", () => {
+  it("detects text changes as strengthened on equal strength", () => {
     const proposed = ORIGINAL_STATEMENTS.map((s) =>
-      s.id === "req-3" ? { ...s, content: "Use SQLite for storage" } : s,
+      s.id === "req-3" ? { ...s, text: "Use SQLite for storage" } : s,
     );
     const diff = computeAmendmentDiff(ORIGINAL_STATEMENTS, proposed);
     expect(diff.strengthened).toHaveLength(1);
@@ -118,7 +118,7 @@ describe("computeAmendmentDiff", () => {
 describe("validateAmendmentDiff", () => {
   it("rejects weakening of hard requirements", () => {
     const proposed = ORIGINAL_STATEMENTS.map((s) =>
-      s.id === "req-1" ? { ...s, isHard: false } : s,
+      s.id === "req-1" ? { ...s, strength: "soft" as const } : s,
     );
     const diff = computeAmendmentDiff(ORIGINAL_STATEMENTS, proposed);
     const errors = validateAmendmentDiff(diff, ORIGINAL_STATEMENTS);
@@ -139,7 +139,7 @@ describe("validateAmendmentDiff", () => {
   it("returns empty for valid amendments", () => {
     const proposed = [
       ...ORIGINAL_STATEMENTS,
-      { id: "req-4", content: "New feature", isHard: false },
+      { id: "req-4", text: "New feature", provenance: "explicit-user", strength: "soft" },
     ];
     const diff = computeAmendmentDiff(ORIGINAL_STATEMENTS, proposed);
     const errors = validateAmendmentDiff(diff, ORIGINAL_STATEMENTS);
@@ -152,7 +152,7 @@ describe("proposeAmendment", () => {
     const contract = makeContract();
     const proposed = [
       ...ORIGINAL_STATEMENTS,
-      { id: "req-4", content: "New", isHard: false },
+      { id: "req-4", text: "New", provenance: "explicit-user", strength: "soft" },
     ];
     const proposal = proposeAmendment(
       contract,
@@ -221,7 +221,7 @@ describe("amend", () => {
     const contract = makeContract();
     const proposed = [
       ...ORIGINAL_STATEMENTS,
-      { id: "req-4", content: "New req", isHard: false },
+      { id: "req-4", text: "New req", provenance: "explicit-user", strength: "soft" },
     ];
     const { result, newContract } = amend(
       contract,
@@ -244,7 +244,7 @@ describe("amend", () => {
   it("rejects hard-requirement weakening", () => {
     const contract = makeContract();
     const proposed = ORIGINAL_STATEMENTS.map((s) =>
-      s.id === "req-1" ? { ...s, isHard: false } : s,
+      s.id === "req-1" ? { ...s, strength: "soft" as const } : s,
     );
     const { result } = amend(
       contract,
@@ -266,7 +266,7 @@ describe("amend", () => {
     const contract = makeContract();
     const proposed = [
       ...ORIGINAL_STATEMENTS,
-      { id: "req-4", content: "New", isHard: false },
+      { id: "req-4", text: "New", provenance: "explicit-user", strength: "soft" },
     ];
     const { newContract } = amend(
       contract,
@@ -286,7 +286,7 @@ describe("amend", () => {
     const contract = makeContract();
     const proposed = [
       ...ORIGINAL_STATEMENTS,
-      { id: "req-4", content: "New", isHard: false },
+      { id: "req-4", text: "New", provenance: "explicit-user", strength: "soft" },
     ];
     amend(
       contract,
@@ -306,9 +306,9 @@ describe("amend", () => {
   it("amendment diff is correct", () => {
     const contract = makeContract();
     const proposed = [
-      { id: "req-1", content: "Must handle 10k concurrent users", isHard: true },
-      { id: "req-2", content: "UI must be accessible", isHard: true },
-      { id: "req-4", content: "Support caching", isHard: false },
+      { id: "req-1", text: "Must handle 10k concurrent users", provenance: "explicit-user", strength: "hard" },
+      { id: "req-2", text: "UI must be accessible", provenance: "explicit-user", strength: "hard" },
+      { id: "req-4", text: "Support caching", provenance: "explicit-user", strength: "soft" },
     ];
     const { newContract } = amend(
       contract,

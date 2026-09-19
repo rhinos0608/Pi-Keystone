@@ -2,15 +2,11 @@
 // Amendments require explicit user authorization, create new versions, never mutate old ones.
 
 import type { ArtifactRef, ISO8601 } from "../domain/types.js";
+import type { ContractStatement } from "./goal-contract.js";
+
+export type { ContractStatement };
 
 // ─── Core types ─────────────────────────────────────────────────────────────
-
-export type ContractStatement = {
-  readonly id: string;
-  readonly content: string;
-  /** Hard statements cannot be weakened. Only USER can approve weakening. */
-  readonly isHard: boolean;
-};
 
 /** Immutable frozen contract. Never mutated — amendments create new versions. */
 export type FrozenContract = {
@@ -81,13 +77,11 @@ export function computeAmendmentDiff(
     const existing = origMap.get(stmt.id);
     if (!existing) {
       added.push(stmt);
-    } else if (existing.content !== stmt.content || existing.isHard !== stmt.isHard) {
-      if (existing.isHard && !stmt.isHard) {
-        weakened.push({ statement: stmt, was: existing.content });
-      } else if (!existing.isHard && stmt.isHard) {
-        strengthened.push({ statement: stmt, was: existing.content });
+    } else if (existing.text !== stmt.text || existing.strength !== stmt.strength) {
+      if (existing.strength === "hard" && stmt.strength !== "hard") {
+        weakened.push({ statement: stmt, was: existing.text });
       } else {
-        strengthened.push({ statement: stmt, was: existing.content });
+        strengthened.push({ statement: stmt, was: existing.text });
       }
     }
   }
@@ -121,12 +115,12 @@ export function validateAmendmentDiff(
 
   for (const w of diff.weakened) {
     const orig = origMap.get(w.statement.id);
-    if (orig?.isHard) {
+    if (orig?.strength === "hard") {
       errors.push({
         kind: "hard_requirement_weakened",
         statementId: w.statement.id,
-        was: orig.content,
-        became: w.statement.content,
+        was: orig.text,
+        became: w.statement.text,
       });
     }
   }

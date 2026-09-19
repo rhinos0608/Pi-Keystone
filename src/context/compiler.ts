@@ -22,8 +22,9 @@ import type {
   EntityRef,
   Finding,
   GoalContextView,
-  GoalStore,
-  MutationLease,
+  ContextGoalStore,
+  ContextLease,
+  ContextAssignment,
   SnapshotRefs,
   ToolInfo,
   VerificationResult,
@@ -111,7 +112,7 @@ function contractKindsForRole(
 
 export function compileContext(
   role: ContextRole,
-  goalStore: GoalStore,
+  goalStore: ContextGoalStore,
   snapshotRefs?: SnapshotRefs,
   config?: CompilerConfig,
 ): GoalContextView {
@@ -259,7 +260,7 @@ export function compileContext(
 
 export function issueAuthority(
   role: ContextRole,
-  lease?: MutationLease,
+  lease?: ContextLease,
 ): AuthorityReceipt {
   return Object.freeze({
     role,
