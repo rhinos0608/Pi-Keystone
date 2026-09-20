@@ -76,6 +76,14 @@ export function redactError(err: unknown): unknown {
       writable: true,
       configurable: true,
     });
+    if (typeof err.stack === "string") {
+      Object.defineProperty(safe, "stack", {
+        value: redactString(err.stack),
+        enumerable: false,
+        writable: true,
+        configurable: true,
+      });
+    }
     // Preserve typed CAS/identity fields: the fresh instance drops every own
     // enumerable prop (code, goalId, expectedVersion, actualVersion, ...).
     // Copy them over, redacting string values only (numbers/booleans pass
