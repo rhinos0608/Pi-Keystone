@@ -101,7 +101,21 @@ try:
         proc.stdin.write(json.dumps(obj, separators=(",", ":")) + "\n")
         proc.stdin.flush()
 
-    time.sleep(2)
+    def wait_ready(timeout=30):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                raise RuntimeError(f"host exited before readiness (code {proc.returncode})")
+            try:
+                line = outq.get(timeout=1)
+            except queue.Empty:
+                continue
+            stderr_lines.append(f"host-out: {line}")
+            if "Keystone: extension loaded, session ready" in line:
+                return
+        raise RuntimeError("timed out waiting for host readiness line")
+
+    wait_ready()
     send({
         "id": "goal-create",
         "type": "prompt",

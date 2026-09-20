@@ -6,9 +6,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   if (process.env.PI_SUBAGENT_CHILD) return;
   let observerPath: string | null = null;
   pi.on("session_start", async (_event, ctx) => {
-    const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
-    observerPath = join(ctx.cwd, ".keystone-e2e-observer.jsonl");
-    appendFileSync(observerPath, JSON.stringify({ kind: "parent", model, sessionId: ctx.sessionManager.getSessionId() }) + "\n");
+    try {
+      const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
+      observerPath = join(ctx.cwd, ".keystone-e2e-observer.jsonl");
+      appendFileSync(observerPath, JSON.stringify({ kind: "parent", model, sessionId: ctx.sessionManager.getSessionId() }) + "\n");
+    } catch {}
   });
   pi.events.on("subagent:async-complete", (data: unknown) => {
     try {

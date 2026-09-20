@@ -9,8 +9,8 @@
  * Suite budget: all items are in-process and millisecond-scale except the
  * optional `pi --version` probe (15s cap).
  */
-import { describe, it, expect } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { describe, it, expect, onTestFinished } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { readFile } from "node:fs/promises";
@@ -216,6 +216,9 @@ describe("host ladder", () => {
 
   it("2 [fake-child]: startGoal writes durable state readable across restart (goal-create persistence)", () => {
     const dir = mkdtempSync(join(tmpdir(), "keystone-host-2-"));
+    onTestFinished(() => {
+      rmSync(dir, { recursive: true, force: true });
+    });
     const first = new GoalStore(dir);
     const log: ReceiptLog = [];
     const goalId = gid();
@@ -232,6 +235,9 @@ describe("host ladder", () => {
 
   it("3 [fake-child]: rpc spawn launches read-only child; async-complete correlates to AssignmentCompleted", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keystone-host-3-"));
+    onTestFinished(() => {
+      rmSync(dir, { recursive: true, force: true });
+    });
     const store = new GoalStore(dir);
     const log: ReceiptLog = [];
     const goalId = gid();
@@ -292,6 +298,9 @@ describe("host ladder", () => {
 
   it("4 [fake-child]: parallel children do not prematurely advance the goal", () => {
     const dir = mkdtempSync(join(tmpdir(), "keystone-host-4-"));
+    onTestFinished(() => {
+      rmSync(dir, { recursive: true, force: true });
+    });
     const store = new GoalStore(dir);
     const log: ReceiptLog = [];
     const goalId = gid();
@@ -330,6 +339,9 @@ describe("host ladder", () => {
 
   it("5 [fake-child]: child write outside allowedCanonicalPaths blocked with keystone reason", () => {
     const root = mkdtempSync(join(tmpdir(), "keystone-host-5-"));
+    onTestFinished(() => {
+      rmSync(root, { recursive: true, force: true });
+    });
     const lease = {
       leaseId: "lease-host-5",
       fencingToken: 3,
@@ -367,6 +379,9 @@ describe("host ladder", () => {
 
   it("6 [fake-child]: kill/restart resumes via continuation states", () => {
     const dir = mkdtempSync(join(tmpdir(), "keystone-host-6-"));
+    onTestFinished(() => {
+      rmSync(dir, { recursive: true, force: true });
+    });
     const log: ReceiptLog = [];
     const goalId = gid();
     startGoal(new GoalStore(dir), goalId, createGoalRecord(goalId, "resume me", WORKSPACE, REVISION), log);
@@ -512,10 +527,16 @@ describe("host ladder", () => {
   it("10 [fake-child]: tiny feature request reaches DONE end-to-end (plumbing test: exercises state chain)", () => {
     // Fixture repo + real file edit through the guard-permitted path.
     const repo = mkdtempSync(join(tmpdir(), "keystone-host-10-"));
+    onTestFinished(() => {
+      rmSync(repo, { recursive: true, force: true });
+    });
     mkdirSync(join(repo, "src"), { recursive: true });
     writeFileSync(join(repo, "src", "version.ts"), "export const name = \"fixture\";\n");
 
     const dir = mkdtempSync(join(tmpdir(), "keystone-host-10-store-"));
+    onTestFinished(() => {
+      rmSync(dir, { recursive: true, force: true });
+    });
     const store = new GoalStore(dir);
     const log: ReceiptLog = [];
     const goalId = gid();

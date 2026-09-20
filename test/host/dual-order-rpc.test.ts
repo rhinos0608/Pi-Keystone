@@ -98,6 +98,7 @@ function runOrder(first: string, second: string): Promise<OrderResult> {
       if (done) return;
       done = true;
       clearTimeout(cap);
+      if (postReady !== undefined) clearTimeout(postReady);
       clearInterval(keepalive);
       if (!child.killed) child.kill("SIGKILL");
       rmSync(cwd, { recursive: true, force: true });
@@ -112,6 +113,7 @@ function runOrder(first: string, second: string): Promise<OrderResult> {
       });
     };
     const cap = setTimeout(finish, CHILD_CAP_MS);
+    let postReady: ReturnType<typeof setTimeout> | undefined;
     let keepaliveSeq = 0;
     const sendKeepalive = () => {
       if (child.exitCode !== null || !child.stdin?.writable) return;
@@ -126,14 +128,14 @@ function runOrder(first: string, second: string): Promise<OrderResult> {
       out += chunk.toString();
       if (!readyAt && `${out}\n${err}`.includes(SUCCESS_SIGNAL)) {
         readyAt = Date.now();
-        setTimeout(finish, POST_READY_GRACE_MS);
+        postReady = setTimeout(finish, POST_READY_GRACE_MS);
       }
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       err += chunk.toString();
       if (!readyAt && `${out}\n${err}`.includes(SUCCESS_SIGNAL)) {
         readyAt = Date.now();
-        setTimeout(finish, POST_READY_GRACE_MS);
+        postReady = setTimeout(finish, POST_READY_GRACE_MS);
       }
     });
     child.on("error", finish);

@@ -1,4 +1,4 @@
-import { writeFileSync, readFileSync, existsSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
@@ -173,7 +173,9 @@ export default function liveE2EDriver(pi: ExtensionAPI): void {
       controller.bindSessionRuntime(null);
       rpc.dispose();
       resetSessionBridges();
-      writeFileSync(resultPath, JSON.stringify(output, null, 2));
+      const tmpPath = `${resultPath}.${process.pid}.tmp`;
+      writeFileSync(tmpPath, JSON.stringify(output, null, 2));
+      renameSync(tmpPath, resultPath);
     }
       })();
     }, 100);
