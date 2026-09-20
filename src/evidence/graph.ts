@@ -62,6 +62,7 @@ export function createEvidenceGraph(): EvidenceGraph {
   const criterionText = new Map<string, string>();
   const criterionSnapshots = new Map<string, string>();
   const assertions = new Map<string, AssertionRecord>();
+  const assertionsByCriterion = new Map<string, string[]>();
   const assertionSeq = new Map<string, number>();
   const nodes = new Set<string>();
 
@@ -109,6 +110,9 @@ export function createEvidenceGraph(): EvidenceGraph {
       runIds: [],
       findingIds: [],
     });
+    const ids = assertionsByCriterion.get(criterionId) ?? [];
+    ids.push(id);
+    assertionsByCriterion.set(criterionId, ids);
     return id;
   }
 
@@ -152,8 +156,9 @@ export function createEvidenceGraph(): EvidenceGraph {
     }
     const requested = [...new Set(criterionIds)];
     const chains: CriterionChain[] = requested.map((criterionId): CriterionChain => {
-      const resolved: ResolvedAssertion[] = [...assertions.values()]
-        .filter((a) => a.criterionId === criterionId)
+      const resolved: ResolvedAssertion[] = (assertionsByCriterion.get(criterionId) ?? [])
+        .map((id) => assertions.get(id))
+        .filter((a): a is AssertionRecord => a !== undefined)
         .map((a): ResolvedAssertion =>
           // Deep-frozen: every assertion object is immutable, not just the array.
           Object.freeze({
@@ -192,7 +197,7 @@ export function createEvidenceGraph(): EvidenceGraph {
       )
       .map((c) => c.criterionId);
     return Object.freeze({
-      nodeIds: Object.freeze([...nodeIds]) as readonly string[],
+      nodeIds: Object.freeze([...new Set(nodeIds)]) as readonly string[],
       chains: Object.freeze(chains) as readonly CriterionChain[],
       coverage: Object.freeze({
         total: chains.length,

@@ -90,13 +90,14 @@ describe("computeAmendmentDiff", () => {
     expect(diff.strengthened[0].statement.id).toBe("req-3");
   });
 
-  it("detects text changes as strengthened on equal strength", () => {
+  it("detects text changes as modified on equal strength", () => {
     const proposed = ORIGINAL_STATEMENTS.map((s) =>
       s.id === "req-3" ? { ...s, text: "Use SQLite for storage" } : s,
     );
     const diff = computeAmendmentDiff(ORIGINAL_STATEMENTS, proposed);
-    expect(diff.strengthened).toHaveLength(1);
-    expect(diff.strengthened[0].was).toBe("Use PostgreSQL for storage");
+    expect(diff.modified).toHaveLength(1);
+    expect(diff.modified[0].was).toBe("Use PostgreSQL for storage");
+    expect(diff.strengthened).toHaveLength(0);
   });
 
   it("diff is frozen", () => {

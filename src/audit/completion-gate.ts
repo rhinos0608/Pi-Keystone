@@ -91,7 +91,8 @@ export type CompletionGateResult = {
  */
 export function evaluateCompletion(input: CompletionInput): CompletionGateResult {
   const verificationPassed = deriveVerificationPassed(input);
-  const predicates = buildPredicates(input, verificationPassed);
+  const verdicts = buildAssertionVerdictIndex(input.evidenceManifest);
+  const predicates = buildPredicates(input, verificationPassed, verdicts);
 
   const allSatisfied = predicates.every((p) => p.satisfied);
   const hasRepairable = predicates.some((p) => !p.satisfied && p.repairable);
@@ -122,7 +123,11 @@ export function evaluateCompletion(input: CompletionInput): CompletionGateResult
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-function buildPredicates(input: CompletionInput, verificationPassed: boolean): CompletionPredicate[] {
+function buildPredicates(
+  input: CompletionInput,
+  verificationPassed: boolean,
+  verdicts: ReadonlyMap<string, "pass" | "fail" | "skipped">,
+): CompletionPredicate[] {
   const preds: CompletionPredicate[] = [];
 
   // 1. Verification passed — derived from manifest coverage when a manifest
@@ -166,7 +171,7 @@ function buildPredicates(input: CompletionInput, verificationPassed: boolean): C
   // verdict) fails closed and is never auto-satisfied.
   const hardReqs = input.contract.requirements.filter((r) => r.strength === "hard");
   for (const req of hardReqs) {
-    const satisfied = isRequirementSatisfied(input, req);
+    const satisfied = isRequirementSatisfied(input, req, verdicts);
     preds.push({
       id: `req-addressed-${req.id}`,
       description: satisfied
@@ -224,21 +229,32 @@ function deriveAuditAccepted(input: CompletionInput, verificationPassed: boolean
   }
 }
 
+function buildAssertionVerdictIndex(
+  manifest: EvidenceManifest | undefined,
+): Map<string, "pass" | "fail" | "skipped"> {
+  const byId = new Map<string, "pass" | "fail" | "skipped">();
+  if (!manifest) return byId;
+  for (const chain of manifest.chains) {
+    for (const a of chain.assertions) byId.set(a.id, a.verdict);
+  }
+  return byId;
+}
+
 /**
  * A hard requirement is satisfied only when every referenced assertion
  * resolves to a passing chain in the evidence manifest. Fail-closed:
  * missing refs, missing manifest, or any non-passing verdict → false.
  */
-function isRequirementSatisfied(input: CompletionInput, req: ContractStatement): boolean {
+function isRequirementSatisfied(
+  input: CompletionInput,
+  req: ContractStatement,
+  verdicts: ReadonlyMap<string, "pass" | "fail" | "skipped">,
+): boolean {
   const manifest = input.evidenceManifest;
   if (!manifest) return false;
   const refs = input.requirementSources?.find((s) => s.requirementId === req.id);
   if (!refs || refs.assertionIds.length === 0) return false;
-  const byId = new Map<string, "pass" | "fail" | "skipped">();
-  for (const chain of manifest.chains) {
-    for (const a of chain.assertions) byId.set(a.id, a.verdict);
-  }
-  return refs.assertionIds.every((id) => byId.get(id) === "pass");
+  return refs.assertionIds.every((id) => verdicts.get(id) === "pass");
 }
 
 /** A criterion is covered when its chain holds at least one passing assertion. */

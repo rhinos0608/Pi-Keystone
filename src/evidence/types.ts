@@ -48,7 +48,12 @@ export type CriterionChain = {
 export type CoverageSummary = {
   readonly total: number;
   readonly covered: number;
-  /** Requested criterion IDs with no passing assertion. */
+  /**
+   * Requested criterion IDs that are uncovered. Veto rule: a criterion is
+   * uncovered when it has no passing assertion, and any failing assertion
+   * vetoes coverage even when another assertion for the same criterion
+   * passes (pass+fail -> uncovered).
+   */
   readonly uncovered: readonly string[];
 };
 

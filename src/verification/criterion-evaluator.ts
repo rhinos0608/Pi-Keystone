@@ -54,6 +54,8 @@ export type CriterionResult = {
   readonly hardProofs: readonly HardProof[];
   /** Human-readable explanation. */
   readonly reason: string;
+  /** Soft descriptions that matched the criterion keywords. */
+  readonly matchingDescriptions?: readonly string[];
 };
 
 // ─── Evidence ─────────────────────────────────────────────────────────────
@@ -158,6 +160,7 @@ function evaluateSoft(
       verdict: "satisfied",
       hardProofs: [],
       reason: `${matchingDescriptions.length} description(s) match criterion keywords`,
+      matchingDescriptions,
     };
   }
 
@@ -205,7 +208,9 @@ export function toCriterionEvaluation(
       criterionText: result.criterionText,
       status,
       reason: result.reason,
-      evidenceRefs: [...evidence.descriptions],
+      evidenceRefs: result.matchingDescriptions && result.matchingDescriptions.length > 0
+        ? [...result.matchingDescriptions]
+        : [...evidence.descriptions],
     };
   }
   return {

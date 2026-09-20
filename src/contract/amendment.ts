@@ -21,6 +21,7 @@ export type AmendmentDiff = {
   readonly removed: readonly ContractStatement[];
   readonly weakened: readonly { statement: ContractStatement; was: string }[];
   readonly strengthened: readonly { statement: ContractStatement; was: string }[];
+  readonly modified: readonly { statement: ContractStatement; was: string }[];
 };
 
 export type AmendmentProposal = {
@@ -72,6 +73,7 @@ export function computeAmendmentDiff(
   const removed: ContractStatement[] = [];
   const weakened: { statement: ContractStatement; was: string }[] = [];
   const strengthened: { statement: ContractStatement; was: string }[] = [];
+  const modified: { statement: ContractStatement; was: string }[] = [];
 
   for (const stmt of proposed) {
     const existing = origMap.get(stmt.id);
@@ -80,8 +82,10 @@ export function computeAmendmentDiff(
     } else if (existing.text !== stmt.text || existing.strength !== stmt.strength) {
       if (existing.strength === "hard" && stmt.strength !== "hard") {
         weakened.push({ statement: stmt, was: existing.text });
-      } else {
+      } else if (existing.strength !== stmt.strength) {
         strengthened.push({ statement: stmt, was: existing.text });
+      } else {
+        modified.push({ statement: stmt, was: existing.text });
       }
     }
   }
@@ -97,6 +101,7 @@ export function computeAmendmentDiff(
     removed: Object.freeze(removed),
     weakened: Object.freeze(weakened),
     strengthened: Object.freeze(strengthened),
+    modified: Object.freeze(modified),
   });
 }
 
@@ -121,6 +126,18 @@ export function validateAmendmentDiff(
         statementId: w.statement.id,
         was: orig.text,
         became: w.statement.text,
+      });
+    }
+  }
+
+  for (const m of diff.modified) {
+    const orig = origMap.get(m.statement.id);
+    if (orig?.strength === "hard" && m.statement.text !== orig.text) {
+      errors.push({
+        kind: "hard_requirement_weakened",
+        statementId: m.statement.id,
+        was: orig.text,
+        became: m.statement.text,
       });
     }
   }
