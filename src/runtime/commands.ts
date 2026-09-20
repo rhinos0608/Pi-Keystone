@@ -92,15 +92,16 @@ export function parseGoalSubcommand(args: string): ParsedGoalSubcommand | null {
     if (sub === "create") {
       return { subcommand: sub, rest };
     }
-    if (sub === "list") {
-      if (rest === "") return { subcommand: sub, rest };
-    } else if (rest.length > 0) {
-      // status/release/cancel require a goal-id-like remainder.
+    if (sub === "list" || sub === "status") {
+      // Bare or remainder-bearing list/status; bare release/cancel still
+      // routes to its own subcommand so the handler reports usage.
       return { subcommand: sub, rest };
     }
-    // Phrases beginning with subcommand words (e.g. "status update for X")
-    // are task text, not a subcommand invocation.
-    return { subcommand: "create", rest: trimmed };
+    if (rest.length > 0) {
+      // release/cancel require a goal-id-like remainder.
+      return { subcommand: sub, rest };
+    }
+    return { subcommand: sub, rest };
   }
   // Bare task text is shorthand for create.
   return { subcommand: "create", rest: trimmed };
