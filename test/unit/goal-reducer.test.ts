@@ -523,10 +523,6 @@ describe("goalReducer", () => {
   });
 
   // --- Task 1: frontier-gated VERIFYING ---
-  function aid(s: string): GoalRecord["assignmentStates"] extends Partial<Record<infer K, unknown>> ? K : never {
-    return s as never;
-  }
-
   it("AssignmentCompleted marks only its assignment when frontier is non-terminal", () => {
     const record = makeRecord("EXECUTING");
     record.executionPlan = {
