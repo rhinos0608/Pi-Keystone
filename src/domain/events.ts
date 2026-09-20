@@ -36,7 +36,10 @@ export function reconciliationCompleted(opts: {
   decision: "ACCEPT_PLAN_BASIS" | "REPLAN" | "BLOCK";
   driverFence?: number;
 }): GoalEvent {
-  return { type: "ReconciliationCompleted", ...opts };
+  const { driverFence, ...rest } = opts;
+  return driverFence === undefined
+    ? { type: "ReconciliationCompleted", ...rest }
+    : { type: "ReconciliationCompleted", ...rest, driverFence };
 }
 
 export function contractCritiqueCompleted(opts: {
@@ -52,7 +55,10 @@ export function contractFrozen(opts: {
   contractRef: ArtifactRef;
   driverFence?: number;
 }): GoalEvent {
-  return { type: "ContractFrozen", ...opts };
+  const { driverFence, ...rest } = opts;
+  return driverFence === undefined
+    ? { type: "ContractFrozen", ...rest }
+    : { type: "ContractFrozen", ...rest, driverFence };
 }
 
 // ContractAmendment* constructors removed (Round-3): zero prod + zero test
@@ -175,7 +181,10 @@ export function cancellationSettled(opts: {
   mutationOutcome: "SETTLED" | "ROLLED_BACK" | "INDETERMINATE";
   driverFence?: number;
 }): GoalEvent {
-  return { type: "CancellationSettled", ...opts };
+  const { driverFence, ...rest } = opts;
+  return driverFence === undefined
+    ? { type: "CancellationSettled", ...rest }
+    : { type: "CancellationSettled", ...rest, driverFence };
 }
 
 export function fatalError(errorRef: ArtifactRef, driverFence?: number): GoalEvent {
