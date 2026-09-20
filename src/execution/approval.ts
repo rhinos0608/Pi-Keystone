@@ -154,12 +154,12 @@ export function evaluateApproval(
   }
   const root = opts.workspaceRoot;
   const intended = new Set(approval.intendedWriteSet.map((e) => normalize(e, root)));
-  const excess = actualWriteSet.map((e) => normalize(e, root)).filter((p) => !intended.has(p));
+  const excess = [...new Set(actualWriteSet.map((e) => normalize(e, root)))].filter((p) => !intended.has(p)).sort();
   if (excess.length > 0) {
     return {
       status: "CONFLICT",
-      reason: `actual write-set exceeds approved intent: ${[...new Set(excess)].sort().join(", ")}`,
-      conflicts: excess.map((p) => ({ path: p, kind: "untracked" as const })),
+      reason: `actual write-set exceeds approved intent: ${excess.join(", ")}`,
+      conflicts: excess.map((p) => ({ path: p, kind: approval.conflicts.find((c) => normalize(c.path, root) === p)?.kind ?? ("untracked" as const) })),
     };
   }
   // Collision-only approval: createApproval records the dirt visible at

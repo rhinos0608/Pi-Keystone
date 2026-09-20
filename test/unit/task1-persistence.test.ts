@@ -1,7 +1,7 @@
 // Task 1 hardening: CAS persistence, corruption typing, active-lease fencing,
 // frontier-gated VERIFYING, and no-op discipline — all at the dispatch level.
-import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type {
@@ -61,6 +61,10 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "keystone-task1-"));
   store = new GoalStore(dir);
   log = [];
+});
+
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
 });
 
 function startedGoal(): GoalId {

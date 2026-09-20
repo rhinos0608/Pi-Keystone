@@ -1,4 +1,4 @@
-import { describe, it } from "vitest";
+import { describe, it, afterAll } from "vitest";
 import assert from "vitest";
 
 import type {
@@ -12,7 +12,7 @@ import { createGoalRecord } from "../../src/domain/goal-record.js";
 import { GoalStore } from "../../src/store/goal-store.js";
 import { IgnoredEventError } from "../../src/store/goal-store.js";
 import type { ReceiptLog } from "../../src/runtime/lifecycle.js";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -64,11 +64,18 @@ function makeGoal(overrides: Partial<GoalRecord> = {}): GoalRecord {
 }
 
 /** Persist a goal to a throwaway GoalStore; returns the store and goal id. */
+const recoveryDirs: string[] = [];
 function persistGoal(record: GoalRecord): { store: GoalStore; goalId: GoalId } {
-  const store = new GoalStore(mkdtempSync(join(tmpdir(), "keystone-recovery-")));
+  const dir = mkdtempSync(join(tmpdir(), "keystone-recovery-"));
+  recoveryDirs.push(dir);
+  const store = new GoalStore(dir);
   store.create(record.goalId, record);
   return { store, goalId: record.goalId };
 }
+
+afterAll(() => {
+  for (const dir of recoveryDirs) rmSync(dir, { recursive: true, force: true });
+});
 
 function makeMutationLease(
   overrides: Partial<MutationLease> = {},

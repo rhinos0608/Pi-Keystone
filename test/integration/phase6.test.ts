@@ -2,8 +2,8 @@
 // Tests: compile context for each role, verify view shape;
 // dispatch read-only + mutation assignments through scheduler.
 
-import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { describe, it, expect, beforeEach, onTestFinished } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type {
@@ -474,6 +474,9 @@ describe("Phase 6: Execution scheduler — mutation dispatch", () => {
 
   it("acquireLease creates a lease and checkLease validates it", () => {
     const root = mkdtempSync(join(tmpdir(), "keystone-p6-lease-"));
+    onTestFinished(() => {
+      rmSync(root, { recursive: true, force: true });
+    });
     const result = ks.acquireLease({
       goalId: "g-1",
       assignmentId: "asgn-p6-1" as AssignmentId,
@@ -499,6 +502,9 @@ describe("Phase 6: Execution scheduler — mutation dispatch", () => {
 
   it("acquireLease denies duplicate lease on same root", () => {
     const root = mkdtempSync(join(tmpdir(), "keystone-p6-dup-"));
+    onTestFinished(() => {
+      rmSync(root, { recursive: true, force: true });
+    });
     const r1 = ks.acquireLease({
       goalId: "g-1",
       assignmentId: "asgn-p6-d1" as AssignmentId,

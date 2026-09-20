@@ -20,7 +20,9 @@ export type UpdateOptions = {
 function isNoOp(existing: GoalRecord, updated: GoalRecord): boolean {
   const strip = (r: GoalRecord): string => {
     const { updatedAt: _u, recordVersion: _v, lastTransitionId: _t, ...rest } = r;
-    return JSON.stringify(rest);
+    const ordered: Record<string, unknown> = {};
+    for (const key of Object.keys(rest).sort()) ordered[key] = (rest as Record<string, unknown>)[key];
+    return JSON.stringify(ordered);
   };
   return strip(existing) === strip(updated);
 }
@@ -504,6 +506,17 @@ export class GoalStore {
   update(
     goalId: GoalId,
     event: GoalEvent,
+    reducer: GoalReducer,
+    opts?: UpdateOptions,
+  ): GoalRecord;
+  update(
+    goalId: GoalId,
+    event: GoalEvent,
+    opts?: UpdateOptions,
+  ): GoalRecord;
+  update(
+    goalId: GoalId,
+    event: GoalEvent,
     reducer?: GoalReducer | UpdateOptions,
     opts?: UpdateOptions,
   ): GoalRecord {
@@ -668,8 +681,9 @@ export class GoalStore {
       try {
         unlinkSync(this.filePath(goalId));
         return true;
-      } catch {
-        return false;
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+        throw err;
       }
     });
   }

@@ -2,7 +2,7 @@
 // Operates on GoalRecord from src/domain/types.ts
 
 import type { GoalRecord, GoalId, DriverLease, ISO8601 } from "../domain/types.js";
-import { GoalStore } from "../store/goal-store.js";
+import { GoalStore, IgnoredEventError } from "../store/goal-store.js";
 
 declare const crypto: { randomUUID(): string };
 
@@ -172,11 +172,16 @@ export function acquireDriverLeasePersisted(
       heartbeatAt,
       expiresAt,
     };
-    store.update(
-      goalId,
-      { type: "DriverLeaseAcquired", lease, fenceCounter: current.driverFenceCounter },
-      { expectedVersion: current.recordVersion },
-    );
+    try {
+      store.update(
+        goalId,
+        { type: "DriverLeaseAcquired", lease, fenceCounter: current.driverFenceCounter },
+        { expectedVersion: current.recordVersion },
+      );
+    } catch (err) {
+      if (err instanceof IgnoredEventError) return store.get(goalId)!;
+      throw err;
+    }
     return store.get(goalId)!;
   }
 

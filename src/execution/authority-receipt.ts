@@ -65,17 +65,25 @@ export function recordReceipt(
   storeOverride?: ReceiptArtifactStore,
 ): ArtifactRef {
   const ref = receipt.artifactRef ?? hashReceipt(receipt);
-  receipt.artifactRef = ref;
+  // Independent copy: never mutate or retain the caller's object, so later
+  // caller edits cannot change indexed bytes, CAS ref, or stored history.
+  const stored: AuthorityReceipt = {
+    toolCallId: receipt.toolCallId,
+    resourceIds: [...receipt.resourceIds],
+    timestamp: receipt.timestamp,
+    sessionId: receipt.sessionId,
+    artifactRef: ref,
+  };
   const store = storeOverride ?? receiptStore;
   if (store) {
-    const persistedRef = store.writeArtifact(Buffer.from(canonicalReceiptBytes(receipt), "utf-8"));
+    const persistedRef = store.writeArtifact(Buffer.from(canonicalReceiptBytes(stored), "utf-8"));
     if (persistedRef !== ref) {
       throw new Error(`authority receipt CAS mismatch: expected ${ref}, persisted ${persistedRef}`);
     }
   }
-  const key = receiptsKey(receipt.sessionId);
+  const key = receiptsKey(stored.sessionId);
   const list = receipts.get(key) ?? [];
-  list.push(receipt);
+  list.push(stored);
   receipts.set(key, list);
   return ref;
 }

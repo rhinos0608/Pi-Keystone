@@ -1,8 +1,8 @@
 // Integration test: goal lifecycle end-to-end
 // Tests: create → event dispatch → state transitions → continuation → persistence
 
-import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, onTestFinished } from "vitest";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { GoalRecord, GoalId, RevisionRef, WorkspaceIdentity, MutationLease } from "../../src/domain/types.js";
@@ -468,7 +468,15 @@ describe("Keystone extension (index.ts)", () => {
 
   it("runtime cancellation keeps the durable mirror when disk lease identity conflicts", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "keystone-cancel-conflict-"));
-    const ks = createKeystone({ dataDir: dir });
+    onTestFinished(() => {
+      rmSync(workspace, { recursive: true, force: true });
+    });
+    let diskLeaseId = "unknown";
+    onTestFinished(() => {
+      try { releaseLease(workspace, diskLeaseId); } catch {}
+    });
+    try {
+      const ks = createKeystone({ dataDir: dir });
     const id = makeGoalId();
     const assignmentId = "cancel-conflict-assignment" as import("../../src/domain/types.js").AssignmentId;
     const workspaceIdentity: WorkspaceIdentity = {
@@ -511,6 +519,7 @@ describe("Keystone extension (index.ts)", () => {
     });
     expect(disk.acquired).toBe(true);
     if (!disk.acquired) throw new Error(disk.reason);
+    diskLeaseId = disk.lease.leaseId;
     const mirror = { ...disk.lease, leaseId: "different-mirror-lease" };
     ks.dispatchEvent(id, { type: "MutationLeaseAttached", lease: mirror, driverFence });
 
@@ -522,7 +531,8 @@ describe("Keystone extension (index.ts)", () => {
     expect(after.activeMutationLease?.leaseId).toBe("different-mirror-lease");
     const stillOnDisk = checkLease(workspace);
     expect(stillOnDisk && !("conflict" in stillOnDisk) ? stillOnDisk.leaseId : null).toBe(disk.lease.leaseId);
-
-    releaseLease(workspace, disk.lease.leaseId);
+    } finally {
+      try { releaseLease(workspace, diskLeaseId); } catch {}
+    }
   });
 });

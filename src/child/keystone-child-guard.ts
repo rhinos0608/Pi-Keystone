@@ -20,8 +20,7 @@
 // guard sees a `command` string, not the shell's argv after expansion, so
 // prefix/substring matching is bypassable (e.g. `allowlisted$(evil)` or
 // `allowlisted; evil`). approvedCommands is therefore EXACT-MATCH-ONLY:
-// the normalized full command must equal a listed entry AND its first token
-// must match a listed binary. Anything else blocks.
+// the normalized full command must equal a listed entry. Anything else blocks.
 //
 // Blocking contract: violations and missing/expired leases return
 // `{ block: true, reason: "keystone: ..." }`; allowed calls return undefined.
@@ -232,10 +231,6 @@ function normalizeCommand(cmd: string): string {
   return cmd.trim().replace(/\s+/g, " ");
 }
 
-function firstToken(cmd: string): string {
-  return cmd.split(" ", 1)[0] ?? "";
-}
-
 /** Command-capable modes may use bash; textual (and unknown) may not. */
 function isCommandCapable(mode: unknown): boolean {
   return mode === "generated" || mode === "dependency" || mode === "migration";
@@ -404,8 +399,8 @@ export function decideToolCall(
   if (isBash) {
     // LOAD-BEARING: bash command-level inspection is imperfect (no shell
     // argv visibility), so approvedCommands is exact-match-only: the full
-    // normalized command must equal a listed entry, and its first token
-    // must match a listed binary. Textual-mode leases never get bash.
+    // normalized command must equal a listed entry. Textual-mode leases
+    // never get bash.
     if (!isCommandCapable(lease.mutationMode)) {
       const mode = typeof lease.mutationMode === "string" ? lease.mutationMode : "textual";
       return { block: true, reason: `keystone: ${name} denied under '${mode}' mutation mode` };

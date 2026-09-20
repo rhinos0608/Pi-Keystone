@@ -731,6 +731,7 @@ export function createKeystone(config: KeystoneConfig) {
     publishLease(leaseRes.lease);
     let released = false;
     let releaseFailure: string | undefined;
+    let originalError: unknown;
     try {
       let snapshot: WorkspaceSnapshot;
       try {
@@ -790,15 +791,20 @@ export function createKeystone(config: KeystoneConfig) {
         { writeSet },
       );
       setSpawnCeiling(sessionId, "mutation");
-      return await awaitSpawn((onComplete) =>
-        executeMutation(auth.lease, launched.turns[1].delegation, rpc, {
-          sessionId,
-          leaseTtlMs: 120_000,
-          onSpawn: ({ runId }) => bindRun(runId),
-          onLeaseUpdate: publishLease,
-          onComplete,
-        }),
-      );
+      try {
+        return await awaitSpawn((onComplete) =>
+          executeMutation(auth.lease, launched.turns[1].delegation, rpc, {
+            sessionId,
+            leaseTtlMs: 120_000,
+            onSpawn: ({ runId }) => bindRun(runId),
+            onLeaseUpdate: publishLease,
+            onComplete,
+          }),
+        );
+      } catch (err) {
+        originalError = err;
+        throw err;
+      }
     } finally {
       const phaseBeforeRelease = store.get(cell.goalId)?.activeMutationLease?.phase;
       try {
@@ -871,8 +877,13 @@ export function createKeystone(config: KeystoneConfig) {
         );
       }
       if (!released) {
+        const originalMessage = originalError instanceof Error
+          ? originalError.message
+          : originalError !== undefined
+            ? String(originalError)
+            : null;
         throw new Error(
-          `mutation-authority-unresolved:${releaseFailure ?? "lease-release-failed"}`,
+          `mutation-authority-unresolved:${releaseFailure ?? "lease-release-failed"}${originalMessage ? ` (original: ${originalMessage})` : ""}`,
         );
       }
     }

@@ -662,7 +662,9 @@ describe("executeMutation", () => {
       // and advance the durable lease to SETTLING even without a caller callback.
       expect(fake.handlers).toHaveLength(1);
     } finally {
-      releaseLease(dir, "unknown");
+      try {
+        if (typeof acquired !== "undefined" && acquired.acquired) releaseLease(dir, acquired.lease.leaseId);
+      } catch {}
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -858,7 +860,9 @@ describe("acquireAuthority / AUTHORITY_READY gate", () => {
         }),
       ).rejects.toThrow(AuthorityGateError);
     } finally {
-      releaseLease(dir, "unknown");
+      try {
+        if (typeof acquired !== "undefined" && acquired.acquired) releaseLease(dir, acquired.lease.leaseId);
+      } catch {}
       rmSync(dir, { recursive: true, force: true });
     }
   });

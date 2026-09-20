@@ -40,9 +40,9 @@ export type ToolPolicy = {
   mutationMode?: string;
   /**
    * For "mutation": exact full commands permitted for bash. Compared by
-   * normalized (whitespace-collapsed) full-string equality; the first token
-   * must also match a listed binary. Bash command-level inspection is
-   * imperfect, so prefix/substring matching is never used.
+   * normalized (whitespace-collapsed) full-string equality. Bash
+   * command-level inspection is imperfect, so prefix/substring matching is
+   * never used.
    */
   approvedCommands?: string[];
   /**
