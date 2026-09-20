@@ -81,10 +81,6 @@ export class PlanCoverageError extends Error {
 
 // ─── Heuristics (deterministic decomposition helpers) ───────────────────────
 
-/** Code-change verbs — userTask containing one implies implementation work. */
-const CODE_CHANGE_PATTERN =
-  /\b(add|implement|create|build|fix|repair|refactor|support|introduce|extend|migration|migrate|update|change|remove|delete|replace|feature|enhance|integrate|improve|optimize|enable|allow|write|edit|patch|upgrade|rename|move)\b/i;
-
 /**
  * Explicitly read-only task openings. Unknown/imperative task wording defaults
  * to implementation rather than silently producing a verifier-only plan.
@@ -99,13 +95,12 @@ const VERIFICATION_SHAPED_PATTERN =
   /\b(pass|passes|passing|verify|verif|test|tests|tested|lint|typecheck|audit|coverage|green|regression|no regression|checks pass)\b/i;
 
 /**
- * True when the userTask needs implementation work. Positive mutation verbs
- * win; otherwise only explicitly read-only task openings stay read-only.
- * This makes ambiguous imperative phrasing fail toward doing the requested
- * work rather than silently substituting verification.
+ * True when the userTask needs implementation work. Explicitly read-only
+ * task openings stay read-only; everything else defaults to implementation
+ * so ambiguous imperative phrasing fails toward doing the requested work
+ * rather than silently substituting verification.
  */
 export function needsCodeChanges(userTask: string): boolean {
-  if (CODE_CHANGE_PATTERN.test(userTask)) return true;
   return !READ_ONLY_TASK_PATTERN.test(userTask);
 }
 
@@ -282,29 +277,22 @@ function applyContextBudget(
   const impl = assignments.filter((a) => a.role === "implementation");
   const verify = assignments.filter((a) => a.role !== "implementation");
   const partitions = [impl, verify].filter((p) => p.length > 0);
+  if (cap < partitions.length) {
+    return [mergeGroups(assignments, "a-merged", 0)];
+  }
   const totalGroups = Math.min(cap, assignments.length);
   const base = Math.floor(totalGroups / partitions.length);
   const extra = totalGroups % partitions.length;
   const counts = partitions.map((p, i) => Math.min(p.length, base + (i < extra ? 1 : 0)));
   const split = (list: PlanAssignment[], prefix: string, offset: number, count: number): PlanAssignment[] => {
-    const groups: PlanAssignment[][] = Array.from({ length: Math.max(1, count) }, () => []);
+    if (count <= 0) return [];
+    const groups: PlanAssignment[][] = Array.from({ length: count }, () => []);
     list.forEach((a, i) => {
       groups[i % groups.length]!.push(a);
     });
     return groups.filter((g) => g.length > 0).map((group, gi) => {
       if (group.length === 1) return group[0]!;
-      const criterionIds = [...new Set(group.flatMap((a) => a.criterionIds))];
-      const targetFiles = [...new Set(group.flatMap((a) => a.targetFiles))].sort();
-      const isImpl = group.some((a) => a.role === "implementation");
-      const role = isImpl ? "implementation" : "verification";
-      return {
-        id: `${prefix}-g${offset + gi + 1}`,
-        description: group.map((a) => a.description).join("; "),
-        targetFiles,
-        role,
-        criterionIds,
-        acceptanceCriteria: criterionIds,
-      };
+      return mergeGroups(group, prefix, offset + gi);
     });
   };
   const out: PlanAssignment[] = [];
@@ -316,6 +304,22 @@ function applyContextBudget(
     out.push(...mapped);
   });
   return out;
+}
+
+function mergeGroups(group: PlanAssignment[], prefix: string, index: number): PlanAssignment {
+  if (group.length === 1) return group[0]!;
+  const criterionIds = [...new Set(group.flatMap((a) => a.criterionIds))];
+  const targetFiles = [...new Set(group.flatMap((a) => a.targetFiles))].sort();
+  const isImpl = group.some((a) => a.role === "implementation");
+  const role = isImpl ? "implementation" : "verification";
+  return {
+    id: `${prefix}-g${index + 1}`,
+    description: group.map((a) => a.description).join("; "),
+    targetFiles,
+    role,
+    criterionIds,
+    acceptanceCriteria: criterionIds,
+  };
 }
 
 // ─── Coverage validation (exact) ────────────────────────────────────────────
