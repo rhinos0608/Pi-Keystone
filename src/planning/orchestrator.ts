@@ -85,14 +85,19 @@ export async function runPlanning(
   // failure's baseline evidence verbatim, so failure_alters_problem stays
   // silent on consistent plans and still fires for genuinely mismatched ones.
   const results: BaselineResults = baselineToResults(baseline);
+  // Normalize once to a shared base so absolute check cwds and repo-relative
+  // hints compare on the same footing (bare cwd "/" aside).
+  const normalizeBase = (p: string): string => `/repo-relative/${p.replace(/^\/+/, "").replace(/\/+$/, "")}`;
   const reconPlan: ReconPlan = {
     actions: plan.assignments.map((a) => {
       const linked = results.tasks.find(
-        (t) => t.status === "failed" && t.filePaths.some((f) =>
-          a.targetFiles.some((target) =>
-            target === f || target.startsWith(`${f.replace(/\/+$/, "")}/`),
-          ),
-        ),
+        (t) => t.status === "failed" && t.filePaths.some((f) => {
+          const base = normalizeBase(f);
+          return a.targetFiles.some((target) => {
+            const norm = normalizeBase(target);
+            return norm === base || norm.startsWith(`${base}/`);
+          });
+        }),
       );
       const diagnostics =
         linked?.diagnostics && linked.diagnostics.length > 0 ? [...linked.diagnostics] : undefined;

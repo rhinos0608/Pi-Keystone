@@ -146,11 +146,16 @@ export function parseStatusV2(raw: string): StatusBuckets {
   return { staged, modified, untracked };
 }
 
+const OVERSIZED_FILE_BYTES = 4 * 1024 * 1024;
+
 function hashContent(root: string, relPath: string): string {
   try {
     const abs = path.join(root, relPath);
     const stat = fs.statSync(abs);
     if (!stat.isFile()) return "missing";
+    if (stat.size > OVERSIZED_FILE_BYTES) {
+      return `oversized:${stat.size}:${Math.floor(stat.mtimeMs)}`;
+    }
     return createHash("sha256").update(fs.readFileSync(abs)).digest("hex");
   } catch {
     return "missing";

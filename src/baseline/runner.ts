@@ -189,6 +189,44 @@ function unavailable(checkId: EcosystemCheckId, reason: string, root: string): E
   return { checkId, status: "UNAVAILABLE", command: reason, exitCode: null, durationMs: 0, version: null, retried: false };
 }
 
+const detectionCache = new Map<string, { pkg: PackageJson | null; manager: PackageManager }>();
+
+/**
+ * Shared per-root package detection: read package.json + lockfiles once per
+ * root and reuse the cached result across check roles instead of re-reading
+ * the manifest and probing lockfiles for every check.
+ */
+export function detectForRoot(root: string): { pkg: PackageJson | null; manager: PackageManager } {
+  const cached = detectionCache.get(root);
+  if (cached) return cached;
+  const pkg = readPackageJson(root);
+  const detected = { pkg, manager: detectManagerFromLockfiles(root, pkg) };
+  detectionCache.set(root, detected);
+  return detected;
+}
+
+/** Test-only: clear the per-root detection cache. */
+export function _clearDetectionCache(): void {
+  detectionCache.clear();
+}
+
+/**
+ * Honor an explicitly requested script name: resolve the check role through
+ * that script when it exists so callers requesting a specific script execute
+ * it rather than a re-derived alternative.
+ */
+function invocationForScript(
+  root: string,
+  checkId: EcosystemCheckId,
+  scriptName: string,
+  detected: { pkg: PackageJson | null; manager: PackageManager },
+): ScriptInvocation | null {
+  const rawBody = detected.pkg?.scripts?.[scriptName];
+  if (!detected.pkg || rawBody === undefined) return null;
+  if (detected.manager === "unknown") return null;
+  return invocationFromMapped(root, checkId, scriptName, rawBody, detected.manager);
+}
+
 type ScriptInvocation = {
   executable: string;
   args: string[];
@@ -196,38 +234,53 @@ type ScriptInvocation = {
   versionBinary: string | null;
 };
 
-/**
- * Resolve the repository's actual package script through its detected package
- * manager. We still call execFile directly, but let the package manager honor
- * the script's real flags/config/compound command instead of substituting a
- * generic tsc/vitest/eslint invocation.
- */
-function resolveScriptInvocation(root: string, checkId: EcosystemCheckId): ScriptInvocation | null {
-  const pkg = readPackageJson(root);
-  const mapped = mapScripts(pkg?.scripts)[checkId];
-  if (!pkg || !mapped) return null;
-  const manager = detectManagerFromLockfiles(root, pkg);
-  if (manager === "unknown") return null;
-
-  const executable = process.platform === "win32" ? `${manager}.cmd` : manager;
-  const args = ["run", mapped];
-  const raw = pkg.scripts?.[mapped] ?? "";
+function versionBinaryForScript(root: string, checkId: EcosystemCheckId, raw: string): string | null {
   const firstToken = raw.trim().match(/^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)*([^\s;&|]+)/)?.[1] ?? "";
   let versionBinary: string | null = null;
   if (firstToken === "node") versionBinary = process.execPath;
   else if (firstToken && !firstToken.includes("$")) {
     versionBinary = resolveLocalBinary(root, firstToken);
   }
-  // Keep the old role-based lookup only as a version-capture fallback. It
-  // never decides what command is executed.
   if (!versionBinary) versionBinary = resolveCheckBinary(root, checkId);
+  return versionBinary;
+}
 
+function invocationFromMapped(
+  root: string,
+  checkId: EcosystemCheckId,
+  mapped: string,
+  raw: string,
+  manager: PackageManager,
+): ScriptInvocation | null {
+  const executable = process.platform === "win32" ? `${manager}.cmd` : manager;
+  const args = ["run", mapped];
+  const versionBinary = versionBinaryForScript(root, checkId, raw);
   return {
     executable,
     args,
     display: `${manager} run ${mapped}`,
     versionBinary,
   };
+}
+
+/**
+ * Resolve the repository's actual package script through its detected package
+ * manager. We still call execFile directly, but let the package manager honor
+ * the script's real flags/config/compound command instead of substituting a
+ * generic tsc/vitest/eslint invocation.
+ */
+function resolveScriptInvocation(
+  root: string,
+  checkId: EcosystemCheckId,
+  detected?: { pkg: PackageJson | null; manager: PackageManager },
+): ScriptInvocation | null {
+  const pkg = detected?.pkg ?? readPackageJson(root);
+  const mapped = mapScripts(pkg?.scripts)[checkId];
+  if (!pkg || !mapped) return null;
+  const manager = detected?.manager ?? detectManagerFromLockfiles(root, pkg);
+  if (manager === "unknown") return null;
+  const raw = pkg.scripts?.[mapped] ?? "";
+  return invocationFromMapped(root, checkId, mapped, raw, manager);
 }
 
 function outcomeStatus(result: CheckResult): EcosystemCheckResult["status"] {
@@ -246,12 +299,14 @@ function outcomeStatus(result: CheckResult): EcosystemCheckResult["status"] {
 export async function runEcosystemCheck(
   root: string,
   checkId: EcosystemCheckId,
-  scriptName: string | undefined,
+  scriptName?: string,
   opts?: { maxMs?: number },
 ): Promise<EcosystemCheckResult> {
-  void scriptName;
   const maxMs = opts?.maxMs ?? 60_000;
-  const invocation = resolveScriptInvocation(root, checkId);
+  const detected = detectForRoot(root);
+  const invocation = scriptName !== undefined
+    ? invocationForScript(root, checkId, scriptName, detected)
+    : resolveScriptInvocation(root, checkId, detected);
   if (!invocation) return unavailable(checkId, `${checkId}: no script or package manager`, root);
   const version = invocation.versionBinary ? await captureVersion(invocation.versionBinary, root) : null;
   const first = await runCheck({
@@ -372,12 +427,14 @@ export async function runCheckWithRetry(record: CheckRecord): Promise<RetryCheck
 export async function runEcosystemCheckWithRetry(
   root: string,
   checkId: EcosystemCheckId,
-  scriptName: string | undefined,
+  scriptName?: string,
   opts?: { maxMs?: number },
 ): Promise<EcosystemCheckResult & { flaky: boolean }> {
-  void scriptName;
   const maxMs = opts?.maxMs ?? 60_000;
-  const invocation = resolveScriptInvocation(root, checkId);
+  const detected = detectForRoot(root);
+  const invocation = scriptName !== undefined
+    ? invocationForScript(root, checkId, scriptName, detected)
+    : resolveScriptInvocation(root, checkId, detected);
   if (!invocation) return { ...unavailable(checkId, `${checkId}: no script or package manager`, root), flaky: false };
   const version = invocation.versionBinary ? await captureVersion(invocation.versionBinary, root) : null;
   const captured = await runEcosystemAttemptWithSingleRetry(invocation, checkId, root, maxMs, version);
@@ -402,7 +459,7 @@ export async function runEcosystemCheckCaptured(
   opts?: { maxMs?: number },
 ): Promise<CapturedEcosystemCheck> {
   const maxMs = opts?.maxMs ?? 60_000;
-  const invocation = resolveScriptInvocation(root, checkId);
+  const invocation = resolveScriptInvocation(root, checkId, detectForRoot(root));
   if (!invocation) {
     return { result: unavailable(checkId, `${checkId}: no script or package manager`, root), stdout: "", stderr: "", flaky: false };
   }

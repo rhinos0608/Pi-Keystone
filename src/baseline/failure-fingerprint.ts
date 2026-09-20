@@ -155,16 +155,37 @@ export function quarantineUnparsedOutput(
   stdout: string,
   stderr: string,
   limit = 50,
+  claimedFingerprints?: readonly HashedFailure[],
 ): QuarantinedMarker[] {
   const combined = `${stdout}\n${stderr}`;
   const lines = combined.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
   if (lines.length === 0) return [];
-  const claimed = new Set(parseFailureFingerprints(checkId, stdout, stderr, "FAIL").map((f) => f.diagnostic));
+  const claimed = (claimedFingerprints ?? parseFailureFingerprints(checkId, stdout, stderr, "FAIL")).map((f) => f.diagnostic);
+  // Index diagnostic heads so claimed lines usually resolve with O(1)/bucket
+  // lookups instead of scanning every claimed diagnostic per candidate line.
+  const heads = claimed.map((d) => d.slice(0, 120));
+  const headSet = new Set(heads);
+  const buckets = new Map<string, string[]>();
+  for (const h of heads) {
+    const key = h.slice(0, 24);
+    const list = buckets.get(key) ?? [];
+    list.push(h);
+    buckets.set(key, list);
+  }
+  const scan = (list: readonly string[], head: string, line: string): boolean =>
+    list.some((d) => d.includes(head) || line.includes(d));
+  const isClaimed = (line: string): boolean => {
+    const head = line.slice(0, 120);
+    if (headSet.has(head)) return true;
+    const bucket = buckets.get(head.slice(0, 24));
+    if (bucket && scan(bucket, head, line)) return true;
+    // Fallback preserves the original cross-bucket substring semantics.
+    return scan(heads, head, line);
+  };
   const out: QuarantinedMarker[] = [];
   for (const line of lines) {
     if (out.length >= limit) break;
-    const claimedLine = [...claimed].some((d) => d.includes(line.slice(0, 120)) || line.includes(d.slice(0, 120)));
-    if (claimedLine) continue;
+    if (isClaimed(line)) continue;
     out.push({
       checkId,
       line: line.slice(0, 500),

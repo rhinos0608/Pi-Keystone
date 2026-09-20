@@ -114,8 +114,11 @@ export function adaptEcosystemToBaselineRecord(
     ...eco.worktree.modified.map((p) => ({ path: p, status: "M" as const })),
     ...eco.worktree.untracked.map((p) => ({ path: p, status: "??" as const })),
   ];
-  const fingerprintFor = (checkId: string): string | null =>
-    eco.failureFingerprints.find((f) => f.checkId === checkId)?.id ?? null;
+  const fingerprintFor = (checkId: string): string | null => {
+    const matches = eco.failureFingerprints.filter((f) => f.checkId === checkId);
+    if (matches.length === 0) return null;
+    return createHash("sha256").update(matches.map((f) => f.id).sort().join("\x00"), "utf-8").digest("hex");
+  };
   const checks: CheckRecord[] = (
     [eco.checks.typecheck, eco.checks.test, eco.checks.lint] as const
   ).flatMap((r) =>

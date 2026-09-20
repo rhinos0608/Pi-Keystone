@@ -121,6 +121,7 @@ describe("runCheck", () => {
 // `sh` and `#!/bin/sh`; the suite requires a POSIX shell and is skipped on
 // win32.
 const POSIX_ONLY = process.platform === "win32";
+const posixIt = POSIX_ONLY ? it.skip : it;
 
 const fixtureDirs: string[] = [];
 afterAll(() => {
@@ -192,7 +193,7 @@ describe("resolveLocalBinary", () => {
 });
 
 describe("runEcosystemCheck", () => {
-  it("executes a present tool and records its version", async () => {
+  posixIt("executes a present tool and records its version", async () => {
     const dir = makeFixture({ scripts: { typecheck: "tsc --noEmit" } });
     installFakeBinary(dir, "tsc", 'if [ "$1" = "--version" ]; then echo "Version 5.7.0"; exit 0; fi\nexit 0');
     const result = await runEcosystemCheck(dir, "typecheck", "typecheck");
@@ -201,7 +202,7 @@ describe("runEcosystemCheck", () => {
     expect(result.exitCode).toBe(0);
   });
 
-  it("honors the repository script arguments instead of substituting hardcoded defaults", async () => {
+  posixIt("honors the repository script arguments instead of substituting hardcoded defaults", async () => {
     const dir = makeFixture({ scripts: { typecheck: "tsc --project custom.json" } });
     installFakeBinary(
       dir,
@@ -230,7 +231,6 @@ describe("runEcosystemCheck", () => {
 });
 
 describe("runCheckWithRetry", () => {
-  const posixIt = POSIX_ONLY ? it.skip : it;
   posixIt("marks pass-on-retry as flaky", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keystone-flaky-"));
     fixtureDirs.push(dir);
@@ -246,7 +246,7 @@ describe("runCheckWithRetry", () => {
     expect(result.outcome).toBe("PASS");
   });
 
-  it("reports stable failure without flaky", async () => {
+  posixIt("reports stable failure without flaky", async () => {
     const result = await runCheckWithRetry({ command: "sh", args: ["-c", "exit 1"], cwd: tmpdir() });
     expect(result.outcome).toBe("FAIL");
     expect(result.retried).toBe(true);
@@ -255,7 +255,7 @@ describe("runCheckWithRetry", () => {
 });
 
 describe("captureEcosystemBaseline", () => {
-  it("records present tools, UNAVAILABLE lint, and stays valid on a dirty red repo", async () => {
+  posixIt("records present tools, UNAVAILABLE lint, and stays valid on a dirty red repo", async () => {
     const dir = makeFixture({ scripts: { typecheck: "tsc --noEmit", test: "vitest run", lint: "eslint ." } });
     installFakeBinary(dir, "tsc", 'if [ "$1" = "--version" ]; then echo "Version 5.7.0"; exit 0; fi\nexit 0');
     installFakeBinary(
@@ -299,7 +299,7 @@ describe("captureEcosystemBaseline", () => {
     expect(staged.worktree.modified).not.toContain("tracked.txt");
   });
 
-  it("captured run exposes stdout for fingerprint parsing", async () => {
+  posixIt("captured run exposes stdout for fingerprint parsing", async () => {
     const dir = makeFixture({ scripts: { test: "vitest run" } });
     installFakeBinary(
       dir,

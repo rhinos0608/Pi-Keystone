@@ -62,7 +62,9 @@ export function parsePorcelain(raw: string): DirtyPath[] {
     // the source side of an in-flight rename/copy.
     if ((code[0] === "R" || code[1] === "R" || code[0] === "C" || code[1] === "C") && i + 1 < parts.length) {
       const originalPath = parts[++i]!;
-      if (originalPath) entries.push({ path: originalPath, status });
+      // The source side of a rename/copy is gone at its old path: record it
+      // as deleted so it stays distinguishable from the destination status.
+      if (originalPath) entries.push({ path: originalPath, status: "D" });
     }
   }
 

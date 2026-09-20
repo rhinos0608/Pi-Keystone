@@ -19,7 +19,7 @@ describe("parsePorcelain", () => {
     const paths = parsePorcelain("R  src/after.ts\0src/before.ts\0");
     expect(paths).toEqual([
       { path: "src/after.ts", status: "R" },
-      { path: "src/before.ts", status: "R" },
+      { path: "src/before.ts", status: "D" },
     ]);
   });
 });
