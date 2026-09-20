@@ -2,3 +2,5 @@
 .pi-smartread.tags.cache/
 node_modules/
 .smart-edit-undo/
+.commandcode/
+.keystone/
