@@ -17,7 +17,7 @@
 | Approval binding | dirtySignature + planEpoch + intendedWriteSet, stale on drift | Time-based approval | Low |
 | Write-set strictness | Exact lease default; scoped only via explicit approval expansion | Scoped patterns default | Medium |
 | Bash for mutation children | No arbitrary bash for `textual` mode; command-capable classes need separate policy | Unrestricted bash | Low now, painful later if wrong |
-| Peer dep | `@earendil-works/pi-coding-agent` as `peerDependencies: "*"`; manifest key `"pi": { "extensions": [...] }`; `keywords: ["pi-package"]` | Keep `piConfig`/`pi>=0.84.1` | Low |
+| Peer dep | `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, and `@earendil-works/pi-tui` as `peerDependencies: "^0.85.1"`; manifest key `"pi": { "extensions": [...] }`; `keywords: ["pi-package"]` | Keep `piConfig`/`pi>=0.84.1` | Low |
 
 ## Known unknowns
 
@@ -207,7 +207,7 @@ The checkboxes below now reflect implementation status, not the age of the origi
 
 **Files (owns):**
 - Modify: `src/index.ts` (thin factory), `src/execution/mutation-launcher.ts`, `src/execution/read-only-launcher.ts`, `src/review/repair.ts` (export), `src/runtime/commands.ts`
-- Modify: `package.json` (remove `piConfig`/peer `pi`; add `keywords:["pi-package"]`, `"pi":{"extensions":["./src/index.ts"]}`, `peerDependencies: { "@earendil-works/pi-coding-agent": "*", "@earendil-works/pi-ai": "*" }`)
+- Modify: `package.json` (remove `piConfig`/peer `pi`; add `keywords:["pi-package"]`, `"pi":{"extensions":["./src/index.ts"]}`, `peerDependencies: { "@earendil-works/pi-coding-agent": "^0.85.1", "@earendil-works/pi-ai": "^0.85.1", "@earendil-works/pi-tui": "^0.85.1" }`)
 - Tests: `test/unit/commands.test.ts`, `test/unit/launcher.test.ts`
 
 **Interfaces:**
